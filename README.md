@@ -159,7 +159,7 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 ## 配置
 
-默认 `model.source: none`，**一次模型调用都没有**，纯确定性采集。要切换，在你自己 profile 的
+默认 `model.source: host`：复用你当前会话的模型，装好就能用；想完全不调用模型就改成 `none`。要切换，在你自己 profile 的
 `cordis.patch.yml` 里覆盖这一行：
 
 ```yaml
@@ -178,8 +178,8 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 | `model.source` | 用什么 | 需要填什么 |
 | --- | --- | --- |
-| `none`（默认） | 不调模型，显式指令照常写入，纠正等你 `taste learn` | 无 |
-| `host` | 直接用 DSH 当前会话的模型（自带 DeepSeek，或你在设置里选的任何模型） | 无 endpoint、无 key |
+| `none` | 不调模型，显式指令照常写入，纠正等你 `taste learn` | 无 |
+| `host`（默认） | 直接用 DSH 当前会话的模型（自带 DeepSeek，或你在设置里选的任何模型） | 无 endpoint、无 key |
 | `custom` | 第三方或本地的 OpenAI / Anthropic 兼容接口 | `format`、`baseURL`、`model`，本地一般不用 key |
 
 `host` 是最省事的一档：不额外配置，复用你正在用的模型；代价是抽取调用会占一次你的主模型额度。
@@ -214,7 +214,7 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 | 配置项 | 默认 | 含义 |
 | --- | --- | --- |
-| `model.source` | `none` | 不调用模型 |
+| `model.source` | `host` | 复用当前会话模型 |
 | `extract.minPending` | 3 | 攒够这么多信号才调一次 |
 | `extract.throttleMinutes` | 10 | 每个会话每个窗口最多一次 |
 | `extract.maxInputChars` | 4000 | 输入约 1000 token |
@@ -294,7 +294,7 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 ### 已知限制（v0.2.0）
 
-- 抽取是可选能力：只有 `model.source` 设为 `host` 或 `custom` 才会用模型蒸馏纠正；默认 `none` 下纠正要等 `taste learn`。
+- 抽取默认用当前会话模型（`host`）；改成 `none` 就只做确定性采集，纠正要等 `taste learn`。
 - 还不会从代码改动里学：你手改的代码没有被观察（计划在 P1）。
 - 按 agent 隔离的注入依赖事件上下文；拿不到 agent 作用域时会退化成一条全局段落，并打一行日志。
 

@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
 
     const SOURCES = [
       ['none', '不使用模型（只做确定性采集）'],
-      ['host', '跟随当前会话模型（自带 DeepSeek）'],
+      ['host', '跟随当前会话模型（默认，自带 DeepSeek）'],
       ['custom', '第三方 / 本地模型（OpenAI 或 Anthropic 兼容）'],
     ]
 

@@ -42,7 +42,7 @@ import z from '@deepseek-ai/schemastery'
 export const Config = z.object({
   source: z
     .union(['none', 'host', 'custom'])
-    .default('none')
+    .default('host')
     .description('none = no model calls · host = the harness\'s current model · custom = an OpenAI/Anthropic-compatible endpoint'),
   format: z.union(['openai', 'anthropic']).default('openai').description('Wire format of a custom endpoint'),
   baseURL: z.string().default('').description('Custom endpoint base URL, e.g. https://dashscope.aliyuncs.com/compatible-mode/v1 or http://127.0.0.1:11434/v1'),

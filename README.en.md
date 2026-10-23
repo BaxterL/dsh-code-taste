@@ -174,7 +174,7 @@ The fragment lists active rules only, without confidence — safe to paste into 
 
 ## Configuration
 
-The bundle runs with `model.source: none` by default — **zero model calls**. To switch,
+By default `model.source: host` — it reuses the model of the current session, so it works out of the box; set `none` for zero model calls. To switch,
 override the row in your profile's `cordis.patch.yml`:
 
 ```yaml
@@ -193,8 +193,8 @@ override the row in your profile's `cordis.patch.yml`:
 
 | `model.source` | Uses | Needs |
 | --- | --- | --- |
-| `none` (default) | no model; explicit instructions still land immediately, corrections wait for `taste learn` | nothing |
-| `host` | the harness's current model (the built-in DeepSeek, or whatever you selected) | no endpoint, no key |
+| `none` | no model; explicit instructions still land immediately, corrections wait for `taste learn` | nothing |
+| `host` (default) | the harness's current model (the built-in DeepSeek, or whatever you selected) | no endpoint, no key |
 | `custom` | an OpenAI/Anthropic-compatible endpoint — third party or local | `format`, `baseURL`, `model`; local usually needs no key |
 
 `host` is the zero-setup choice: it spends one call of the model you are already using.
@@ -229,7 +229,7 @@ literal key — `taste config` prints only `env:NAME` or `(inline key set)`.
 
 | Knob | Default | Meaning |
 | --- | --- | --- |
-| `model.source` | `none` | no calls at all |
+| `model.source` | `host` | reuses the session model |
 | `extract.minPending` | 3 | this many waiting signals before one call |
 | `extract.throttleMinutes` | 10 | at most one call per session per window |
 | `extract.maxInputChars` | 4000 | ≈1000 tokens in |
@@ -324,7 +324,7 @@ rules file.
 
 ### Known limits (v0.2.0)
 
-- Extraction is opt-in: `model.source` must be `host` or `custom` for the model to distil
+- Extraction defaults to the session model (`host`); set `model.source: none` to keep it deterministic only, where the model does not distil
   corrections. With the default `none`, corrections wait for `taste learn`.
 - No diff learning yet: code you rewrite by hand is not observed (planned, P1).
 - Per-agent prompt scoping depends on the event context; when it is not agent-scoped the
