@@ -60,6 +60,23 @@ dsh plugin --profile desktop add ./dsh-code-taste
 
 A local checkout is linked, not copied, so edits take effect after the next restart.
 
+### Let the agent install it
+
+Paste this into a DeepSeek Harness session and it will do the work:
+
+```
+Install the dsh-code-taste bundle from https://github.com/BaxterL/dsh-code-taste into my current DSH profile.
+
+1. Install it as a bundle — `plugin_manager` with `install_bundle`, target
+   `github:BaxterL/dsh-code-taste`, or `dsh plugin --profile <profile> add github:BaxterL/dsh-code-taste`.
+2. Do not touch any other plugin, bundle, config or workspace file.
+3. Do not restart anything yourself. Tell me whether a restart is required and what it affects.
+4. Afterwards show me the row id, the resolved version, and the exact next steps to verify it.
+```
+
+The agent should answer with the row id (`taste`), the version, and `restart-required` when that is the
+case. If it reports `applied`, the bundle is already loaded; otherwise restart and run `taste list`.
+
 ### Restart is required
 
 The bundle inserts its row when the host starts. There is no hot reload for a new
@@ -155,6 +172,72 @@ taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 The fragment lists active rules only, without confidence — safe to paste into an
 `AGENTS.md` or a `CLAUDE.md`.
 
+## Configuration
+
+The bundle runs in `regex` mode with **zero model calls** by default. To switch modes,
+override the row in your profile's `cordis.patch.yml`:
+
+```yaml
+- id: taste
+  name: dsh-code-taste
+  config:
+    mode: hybrid
+    model:
+      format: openai
+      baseURL: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-plus
+      apiKeyEnv: DASHSCOPE_API_KEY
+```
+
+### Modes
+
+| mode | model calls | behaviour |
+| --- | --- | --- |
+| `regex` (default) | none | explicit instructions and guardrails are written immediately; corrections wait for `taste learn` |
+| `hybrid` | one per batch | a small model turns a batch of signals into rules, throttled and capped |
+
+### Model routes
+
+`format: openai` talks to any `/chat/completions` endpoint:
+
+| Route | baseURL | example model |
+| --- | --- | --- |
+| Qwen / DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| Ollama (local) | `http://127.0.0.1:11434/v1` | `qwen2.5-coder:7b` |
+| llama.cpp (local) | `http://127.0.0.1:8080/v1` | whatever `-m` loaded |
+| LM Studio (local) | `http://127.0.0.1:1234/v1` | the loaded model id |
+| vLLM (local) | `http://127.0.0.1:8000/v1` | the served model id |
+
+`format: anthropic` talks to the Messages API:
+
+```yaml
+      format: anthropic
+      baseURL: https://api.anthropic.com
+      model: claude-sonnet-4-5
+      apiKeyEnv: ANTHROPIC_API_KEY
+```
+
+Local endpoints usually need no key: leave both `apiKey` and `apiKeyEnv` empty.
+`apiKeyEnv` names an environment variable; `apiKey` is a literal fallback. Never commit a
+literal key — `taste config` prints only `env:NAME` or `(inline key set)`.
+
+### Token budget
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `regex` | no calls at all |
+| `extract.minPending` | 3 | this many waiting signals before one call |
+| `extract.throttleMinutes` | 10 | at most one call per session per window |
+| `extract.maxInputChars` | 4000 | ≈1000 tokens in |
+| `model.maxOutputTokens` | 256 | hard cap on the reply |
+| `extract.maxRulesPerRun` | 3 | rules accepted per call |
+| `injectBudgetChars` | 3000 | ≈750 tokens of rules per prompt (minimum 400) |
+
+In `regex` mode the only recurring cost is the injected section: about 750 tokens by
+default, most of it the fixed preamble. Lower `injectBudgetChars` if you want it tighter.
+
+`taste config` prints the effective mode, budget, route and warnings — never the key.
+
 ## Tools
 
 The plugin exposes one tool, `taste`.
@@ -237,8 +320,8 @@ rules file.
 
 ### Known limits (v0.2.0)
 
-- No LLM extractor yet: corrections need `taste learn` + `taste add`. Explicit
-  instructions and guardrails are captured automatically.
+- Extraction is opt-in: `mode: hybrid` is needed for the model to distil corrections. In the
+  default `regex` mode corrections wait for `taste learn`.
 - No diff learning yet: code you rewrite by hand is not observed (planned, P1).
 - Per-agent prompt scoping depends on the event context; when it is not agent-scoped the
   plugin falls back to one global section and logs that once.

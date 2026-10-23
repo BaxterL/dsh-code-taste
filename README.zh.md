@@ -53,6 +53,22 @@ dsh plugin --profile desktop add ./dsh-code-taste
 
 本地目录是**链接**进去的，不是拷贝，所以改完源码重启一次就生效。
 
+### 让 DeepSeek 帮你装
+
+把下面这段直接粘给一个 DeepSeek Harness 会话，它会替你做：
+
+```
+把 https://github.com/BaxterL/dsh-code-taste 这个 bundle 装进我当前的 DSH profile。
+
+1. 用 plugin_manager 的 install_bundle，target 填 `github:BaxterL/dsh-code-taste`；
+   或者执行 `dsh plugin --profile <profile> add github:BaxterL/dsh-code-taste`。
+2. 不要动其它任何插件、bundle、配置或工作区文件。
+3. 不要自己重启。告诉我是否需要重启、会影响什么。
+4. 装完把 row id、解析到的版本号，以及验证步骤告诉我。
+```
+
+正常情况下它会回答：row id 是 `taste`、版本号是多少、以及 `restart-required`。如果它说 `applied`，说明已经加载；否则重启后再跑一次 `taste list`。
+
 ### 必须重启
 
 bundle 的行是在宿主启动时插入的，新装 bundle 没有热重载。**装完重启 DSH**。
@@ -141,6 +157,72 @@ taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 导出的片段只列生效规则、不带置信度，可以直接贴进 `AGENTS.md` 或 `CLAUDE.md`。
 
+## 配置
+
+默认是 `regex` 模式，**一次模型调用都没有**。要切换，在你自己 profile 的
+`cordis.patch.yml` 里覆盖这一行：
+
+```yaml
+- id: taste
+  name: dsh-code-taste
+  config:
+    mode: hybrid
+    model:
+      format: openai
+      baseURL: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-plus
+      apiKeyEnv: DASHSCOPE_API_KEY
+```
+
+### 两种模式
+
+| mode | 模型调用 | 行为 |
+| --- | --- | --- |
+| `regex`（默认） | 无 | 显式指令和禁令立即写入；纠正等你 `taste learn` |
+| `hybrid` | 每批一次 | 用一个小模型把一批信号蒸馏成规则，有节流和上限 |
+
+### 模型线路
+
+`format: openai` 走任何 `/chat/completions` 接口：
+
+| 线路 | baseURL | 模型示例 |
+| --- | --- | --- |
+| 通义千问 / DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| Ollama（本地） | `http://127.0.0.1:11434/v1` | `qwen2.5-coder:7b` |
+| llama.cpp（本地） | `http://127.0.0.1:8080/v1` | `-m` 加载的那个 |
+| LM Studio（本地） | `http://127.0.0.1:1234/v1` | 加载的模型 id |
+| vLLM（本地） | `http://127.0.0.1:8000/v1` | 服务的模型 id |
+
+`format: anthropic` 走 Messages API：
+
+```yaml
+      format: anthropic
+      baseURL: https://api.anthropic.com
+      model: claude-sonnet-4-5
+      apiKeyEnv: ANTHROPIC_API_KEY
+```
+
+本地接口一般不需要 key：`apiKey` 和 `apiKeyEnv` 都留空即可。`apiKeyEnv` 填环境变量名，
+`apiKey` 是直接写死的兜底值。**不要把 key 提交进仓库**——`taste config` 只会显示
+`env:NAME` 或 `(inline key set)`。
+
+### token 预算
+
+| 配置项 | 默认 | 含义 |
+| --- | --- | --- |
+| `mode` | `regex` | 完全不调用模型 |
+| `extract.minPending` | 3 | 攒够这么多信号才调一次 |
+| `extract.throttleMinutes` | 10 | 每个会话每个窗口最多一次 |
+| `extract.maxInputChars` | 4000 | 输入约 1000 token |
+| `model.maxOutputTokens` | 256 | 输出硬上限 |
+| `extract.maxRulesPerRun` | 3 | 单次最多接受的规则数 |
+| `injectBudgetChars` | 3000 | 每轮注入约 750 token（最小 400） |
+
+`regex` 模式下唯一持续的开销就是注入那一段：默认约 750 token，其中大部分是固定的引导语。
+嫌多可以把 `injectBudgetChars` 调小。
+
+`taste config` 会打印当前模式、预算、线路和警告，**不会打印 key**。
+
 ## 工具
 
 插件只暴露一个工具：`taste`。
@@ -208,7 +290,7 @@ taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 ### 已知限制（v0.2.0）
 
-- 还没有 LLM 抽取器：纠正需要 `taste learn` + `taste add`。显式指令和禁令是自动捕获的。
+- 抽取是可选能力：只有 `mode: hybrid` 才会用模型蒸馏纠正；默认的 `regex` 模式下纠正要等 `taste learn`。
 - 还不会从代码改动里学：你手改的代码没有被观察（计划在 P1）。
 - 按 agent 隔离的注入依赖事件上下文；拿不到 agent 作用域时会退化成一条全局段落，并打一行日志。
 

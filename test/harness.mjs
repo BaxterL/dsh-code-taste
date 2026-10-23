@@ -15,6 +15,9 @@ process.env.DSH_HOME = home
 const { apply } = await import('../index.js')
 const { similarity, decayed, contentId } = await import('../lib/store.js')
 const { classify, prefilter } = await import('../lib/signals.js')
+const { resolveConfig, canExtract } = await import('../lib/config.js')
+const { buildRequest, parseResponse } = await import('../lib/llm.js')
+const { parseRules } = await import('../lib/extract.js')
 
 const handlers = new Map()
 const contexts = []
@@ -77,7 +80,16 @@ const session = { id: 'sess-1' }
 const exec = { agent: { session } }
 const say = text => emit('agent/inbox/claimed', { agent: { session }, message: { content: [{ type: 'text', text }] } })
 
-apply(ctx)
+apply(ctx, {
+  mode: 'hybrid',
+  injectBudgetChars: 1200,
+  model: {
+    format: 'openai',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+  },
+})
 emit('agent/created', { agent: { session } })
 
 console.log('\n# registration')
@@ -179,6 +191,44 @@ console.log('\n# forgetting')
 const forgotten = await tool.execute({ action: 'forget', id: pendingId }, exec)
 check('forget reports removal', forgotten.text.startsWith('Removed'))
 check('rule gone from the file', !readProject().includes('pytest'))
+
+console.log('\n# config')
+const defaults = resolveConfig(undefined).config
+check('default mode is regex (no model calls)', defaults.mode === 'regex')
+check('default injection budget is 3000 chars', defaults.injectBudgetChars === 3000)
+check('bad mode falls back with a warning', resolveConfig({ mode: 'magic' }).config.mode === 'regex')
+check('hybrid without a route cannot extract', canExtract(resolveConfig({ mode: 'hybrid' }).config) === false)
+check('hybrid with a route can extract', canExtract(resolveConfig({ mode: 'hybrid', model: { baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen2.5-coder:7b' } }).config) === true)
+check('budget is clamped', resolveConfig({ injectBudgetChars: 1 }).config.injectBudgetChars === 400)
+const shown = await tool.execute({ action: 'config' }, exec)
+check('taste config reports the active mode', shown.text.includes('mode: hybrid') && shown.text.includes('qwen-plus'))
+check('taste config never prints a key', !shown.text.includes('sk-'))
+
+console.log('\n# request builders')
+const openai = buildRequest(
+  { model: { format: 'openai', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', apiKey: '', apiKeyEnv: 'DASHSCOPE_API_KEY', maxOutputTokens: 128, temperature: 0 } },
+  { system: 'sys', user: 'usr' },
+)
+const openaiBody = JSON.parse(openai.init.body)
+check('openai url ends in /chat/completions', openai.url.endsWith('/chat/completions'))
+check('openai sends a system message first', openaiBody.messages[0].role === 'system' && openaiBody.messages[1].content === 'usr')
+check('openai caps output tokens', openaiBody.max_tokens === 128)
+const anthropic = buildRequest(
+  { model: { format: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', apiKey: 'test-key', apiKeyEnv: '', maxOutputTokens: 64, temperature: 0 } },
+  { system: 'sys', user: 'usr' },
+)
+check('anthropic url ends in /v1/messages', anthropic.url.endsWith('/v1/messages'))
+check('anthropic sets the version header', anthropic.init.headers['anthropic-version'] !== undefined)
+check('anthropic passes the key in x-api-key', anthropic.init.headers['x-api-key'] === 'test-key')
+check('anthropic parses text blocks', parseResponse('anthropic', { content: [{ type: 'text', text: 'hi' }] }) === 'hi')
+check('openai parses choice content', parseResponse('openai', { choices: [{ message: { content: 'ok' } }] }) === 'ok')
+
+console.log('\n# extraction parsing')
+const parsedRules = parseRules('```json\n{"rules":[{"text":"Use const","category":"code-style"},{"text":"x","category":"nope"}]}\n```', 3)
+check('fenced JSON is parsed', parsedRules.length === 1 && parsedRules[0].text === 'Use const')
+check('too-short rules are dropped', parseRules('{"rules":[{"text":"x"}]}', 3).length === 0)
+check('rule count is capped', parseRules('{"rules":[{"text":"aaaa"},{"text":"bbbb"},{"text":"cccc"}]}', 2).length === 2)
+check('garbage returns nothing', parseRules('no json here', 3).length === 0)
 
 rmSync(home, { recursive: true, force: true })
 rmSync(work, { recursive: true, force: true })

@@ -27,13 +27,14 @@
 - [ ] **Choice** — the option chosen in a question (`userQuestions`), and the approach picked
       repeatedly across turns
 
-### Extractor
+### Extractor (v0.3.0)
 
-- [ ] `lib/extract.js`: one LLM call per turn boundary, only when a signal exists
-- [ ] strict JSON output `{op: add|reinforce|weaken|replace, text, category, scope, glob?, evidence_kind, evidence_quote}`
-- [ ] confidence computed in code, never taken from the model
-- [ ] merge: conflict resolution (new wins, old loses 0.25)
-- [ ] throttling: one extraction per 10 minutes per session, three rules per turn
+- [x] `lib/config.js`: `mode: regex | hybrid`, injection budget, model route, extract limits
+- [x] `lib/llm.js`: OpenAI-compatible and Anthropic Messages clients, local endpoints included
+- [x] `lib/extract.js`: one call per batch, throttled; reply parsed, categories whitelisted
+- [x] confidence computed in code (0.55 with ≥3 signals, else 0.5 / pending), never taken from the model
+- [ ] conflict resolution when a new rule contradicts an old one (new wins, old loses 0.25)
+- [ ] `op: reinforce | weaken | replace` — today the model can only propose new rules
 
 ## P2 — scope and explanation
 
