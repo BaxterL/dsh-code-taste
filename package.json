@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-taste",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Learns your coding taste from explicit instructions and corrections, stores it as confidence-scored rules in editable markdown, and injects them into every session.",
   "type": "module",
   "exports": {
@@ -32,6 +32,7 @@
       "platform": "web",
       "immediately": true,
       "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-plugin-manager"
       ]
     }

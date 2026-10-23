@@ -236,6 +236,9 @@ window.__ModuleLoader__.load({
 
     /** Client entry point: one card, guarded by whether the host serves this namespace. */
     function apply(ctx) {
+      if (typeof console !== 'undefined' && console.info) {
+        console.info('[dsh-code-taste] client card applying; configForms =', Boolean(ctx.configForms))
+      }
       if (!ctx.configForms || typeof ctx.configForms.whileServed !== 'function') {
         if (typeof console !== 'undefined' && console.warn) {
           console.warn('[dsh-code-taste] configForms 服务不可用，设置卡片未注册（宿主功能不受影响）')
