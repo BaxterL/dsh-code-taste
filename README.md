@@ -1,6 +1,8 @@
 # dsh-code-taste
 
-![dsh-code-taste banner](https://baxterl.github.io/assets/dsh-code-taste/banner.png)
+[English](README.md) | [中文](README.zh.md)
+
+![dsh-code-taste banner](https://baxterl.github.io/assets/dsh-code-taste/banner.png?v=2)
 
 Teaches DeepSeek Harness **your** taste — coding style, aesthetic preferences and the
 habits you keep correcting — the way
