@@ -72,7 +72,7 @@ const until = async (predicate, timeoutMs = 3000) => {
   return false
 }
 
-const projectFile = join(work, '.dsh', 'taste', 'TASTE.md')
+const projectFile = join(home, 'taste', 'TASTE.md')
 const readProject = () => readFileSync(projectFile, 'utf8')
 const ruleIdOf = text => text.match(/^- \[(r_[a-z0-9]+)\]/m)?.[1]
 

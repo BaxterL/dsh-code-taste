@@ -243,7 +243,7 @@ taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 - **`text`** — 一句祈使句，≤ 200 字。写成一个月后还看得懂的样子：“统一用 const，除非需要重新赋值”，而不是“这里改一下”。
 - **`category`** — `code-style`（默认）、`design`、`stack`、`workflow`、`project-detail`、`communication`、`avoid`。只用于分组和在提示词里加标签，不改变行为。
-- **`scope`** — `project`（默认）只在这个工作区生效，`global` 全局生效。同名规则项目覆盖全局。
+- **`scope`** — `global`（默认）对所有工作区生效，`project` 只在当前工作区生效。同名规则项目覆盖全局。
 - **`confidence`** — `0.1`–`0.95`。不填就按来源定：模型自己加的是 `0.55`，显式指令是 `0.85–0.90`。低于 `0.55` 的进 `pending`，不会注入。
 - **`glob`** — 把规则限定到匹配的路径，比如 `src/ui/**`。目前只存储并展示，路径匹配在 P2 做。
 - **`id`** — 内容寻址（`r_` + 归一化文本的 SHA-1 前 8 位），同一条规则学两次会落到同一个 id，不会分叉。

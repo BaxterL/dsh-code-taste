@@ -226,7 +226,7 @@ function start(ctx, rawConfig) {
   }
 
   const addRule = async (cwd, input) => {
-    const scope = input.scope === 'global' ? 'global' : 'project'
+    const scope = input.scope === 'project' ? 'project' : 'global'
     const dir = tasteDir(cwd, scope)
     const rules = await loadScope(dir, scope)
     const state = await loadState(dir)

@@ -261,8 +261,8 @@ The plugin exposes one tool, `taste`.
 - **`category`** — `code-style` (default), `design`, `stack`, `workflow`, `project-detail`,
   `communication`, `avoid`. It only groups rules and labels them in the prompt; it does
   not change behaviour.
-- **`scope`** — `project` (default) lives in the workspace, `global` applies everywhere.
-  Project rules shadow global rules with the same text.
+- **`scope`** — `global` (default) applies everywhere; `project` stays inside this
+  workspace. Project rules shadow global rules with the same text.
 - **`confidence`** — `0.1`–`0.95`. Omit it and the source decides: `0.55` for a rule the
   agent adds, `0.85–0.90` for an explicit instruction. Below `0.55` the rule lands in
   `pending` and is not injected.
