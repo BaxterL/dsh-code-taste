@@ -14,14 +14,25 @@
 - [x] secret floor (credentials rejected, emails redacted)
 - [x] fake-context harness
 
-## P1 — the extractor
+## P1 — behavioural signals and the extractor
+
+### Signals
+
+- [ ] **Edit** — files the agent wrote, compared with the file afterwards
+      (`fs/write-intent` records the target; `fs/observed` and a turn-end read give the diff)
+- [ ] **Reject** — a tool decision that ends in deny (`tools/pre-execute`), and a change that is
+      reverted (the workspace diff returning to the pre-write content)
+- [ ] **Accept** — an agent-written file that survives N turns without an edit; reinforces the
+      rule behind the change by a small step instead of adding a rule
+- [ ] **Choice** — the option chosen in a question (`userQuestions`), and the approach picked
+      repeatedly across turns
+
+### Extractor
 
 - [ ] `lib/extract.js`: one LLM call per turn boundary, only when a signal exists
 - [ ] strict JSON output `{op: add|reinforce|weaken|replace, text, category, scope, glob?, evidence_kind, evidence_quote}`
 - [ ] confidence computed in code, never taken from the model
 - [ ] merge: conflict resolution (new wins, old loses 0.25)
-- [ ] diff signal: files the agent wrote, then the user edited (`fs/write-intent` + `fs/observed`)
-- [ ] tool-rejection signal: `tools/pre-execute` decisions that end in deny
 - [ ] throttling: one extraction per 10 minutes per session, three rules per turn
 
 ## P2 — scope and explanation
