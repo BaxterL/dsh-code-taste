@@ -29,6 +29,7 @@ import { baseConfidence, classify, inferCategory, prefilter, toRuleText } from '
 import { renderPrompt, selectRules } from './lib/inject.js'
 import { canExtract, describeConfig, resolveConfig } from './lib/config.js'
 import { coerceField, readSettings, toPublicConfig, writeSettings } from './lib/settings.js'
+import { describeUsage, recordUsage, summarize } from './lib/usage.js'
 import { complete, completeWithHost } from './lib/llm.js'
 import { runExtraction } from './lib/extract.js'
 import { createTasteTool } from './lib/tool.js'
@@ -171,7 +172,7 @@ function start(ctx, rawConfig) {
           path: '/dsh-code-taste/config',
           handler: async (request, response) => {
             if (request.method === 'GET') {
-              send(response, 200, toPublicConfig(config))
+              send(response, 200, { ...toPublicConfig(config), usage: summarize() })
               return
             }
             if (request.method !== 'POST') {
@@ -189,7 +190,7 @@ function start(ctx, rawConfig) {
               const merged = { ...readSettings(), [body.field]: result.value }
               writeSettings(merged)
               reapply(merged)
-              send(response, 200, toPublicConfig(config))
+              send(response, 200, { ...toPublicConfig(config), usage: summarize() })
             } catch (error) {
               send(response, 400, { error: error instanceof Error ? error.message : String(error) })
             }
@@ -497,14 +498,39 @@ function start(ctx, rawConfig) {
     const batch = [...queue]
     extracting.add(sessionId)
     lastExtract.set(sessionId, Date.now())
+    const startedAt = Date.now()
+    const route = config.model.source === 'host' ? 'host' : `${config.model.format}:${config.model.model}`
     runExtraction({ config, pending: batch, cwd, addRule, callModel })
-      .then(stored => {
+      .then(result => {
+        const stored = result?.stored ?? 0
         const rest = (pending.get(sessionId) ?? []).filter(entry => !batch.includes(entry))
         pending.set(sessionId, rest)
         refreshWorkspace(cwd)
+        recordUsage({
+          source: config.model.source,
+          model: route,
+          ok: true,
+          inputChars: result?.inputChars ?? 0,
+          outputChars: result?.outputChars ?? 0,
+          inputTokens: result?.usage?.inputTokens,
+          outputTokens: result?.usage?.outputTokens,
+          rules: stored,
+          ms: Date.now() - startedAt,
+        })
         if (stored > 0) ctx.logger?.info?.('taste: extracted %d rule(s) from %d signal(s)', stored, batch.length)
       })
-      .catch(error => ctx.logger?.warn?.('taste: extraction failed: %o', error))
+      .catch(error => {
+        recordUsage({
+          source: config.model.source,
+          model: route,
+          ok: false,
+          inputChars: 0,
+          outputChars: 0,
+          error: error instanceof Error ? error.message : String(error),
+          ms: Date.now() - startedAt,
+        })
+        ctx.logger?.warn?.('taste: extraction failed: %o', error)
+      })
       .finally(() => extracting.delete(sessionId))
   }
 
@@ -576,6 +602,7 @@ function start(ctx, rawConfig) {
       cwdOf,
       sessionIdOf,
       configText: () => describeConfig(config, warnings),
+      usageText: () => describeUsage(),
       readMerged: async cwd => mergeFor(cwd),
       addRule: async (cwd, input) => {
         const result = await addRule(cwd, input)

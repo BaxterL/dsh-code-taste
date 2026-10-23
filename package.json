@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-taste",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Learns your coding taste from explicit instructions and corrections, stores it as confidence-scored rules in editable markdown, and injects them into every session.",
   "type": "module",
   "exports": {

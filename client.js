@@ -312,6 +312,14 @@ window.__ModuleLoader__.load({
           ),
         ),
 
+        value.usage && value.usage.calls > 0
+          ? React.createElement(
+              'div',
+              { style: S.footer },
+              `抽取消耗：${value.usage.calls} 次调用 · 输入 ${value.usage.inputTokens} / 输出 ${value.usage.outputTokens} tokens`,
+            )
+          : null,
+
         error
           ? React.createElement('div', { style: S.error }, `保存失败：${error}`)
           : React.createElement(
