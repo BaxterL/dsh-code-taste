@@ -16,6 +16,13 @@ window.__ModuleLoader__.load({
     /** Namespace of the host entry this card configures: the package name. */
     const NS = 'dsh-code-taste'
 
+    /**
+     * The configForms namespace is the host entry id. For a bundle that is the
+     * package name, but our patch row is `taste`, so ask for both and take
+     * whichever the host actually serves.
+     */
+    const NS_CANDIDATES = [NS, 'taste']
+
     const SOURCES = [
       ['none', '不使用模型（只做确定性采集）'],
       ['host', '跟随当前会话模型（自带 DeepSeek）'],
@@ -238,10 +245,13 @@ window.__ModuleLoader__.load({
 
       const inject = () => {
         let form = null
-        try {
-          form = ctx.configForms.get(NS)
-        } catch {
-          form = null
+        for (const id of NS_CANDIDATES) {
+          if (form) break
+          try {
+            form = ctx.configForms.get(id)
+          } catch {
+            form = null
+          }
         }
         return {
           form,
@@ -254,7 +264,7 @@ window.__ModuleLoader__.load({
 
       ctx.effect(
         () =>
-          ctx.configForms.whileServed([NS], () =>
+          ctx.configForms.whileServed(NS_CANDIDATES, () =>
             ctx.slots.inject('plugins.bundle.config', () =>
               ctx.slots.register(
                 { name: 'plugins.bundle.config', key: NS, inject },
