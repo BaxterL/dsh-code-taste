@@ -1,0 +1,4 @@
+# dsh-taste — learn the user's coding taste, then write like them.
+- insert:
+    - id: taste
+      name: 'dsh-code-taste'
