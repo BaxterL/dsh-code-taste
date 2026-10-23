@@ -1,4 +1,4 @@
-# dsh-taste
+# dsh-code-taste
 
 Teaches DeepSeek Harness **your** coding taste — the way
 [Command Code's taste](https://commandcode.ai/docs/taste) works — and applies it to
