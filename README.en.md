@@ -165,8 +165,8 @@ sentence (trimmed to 200 characters, never the surrounding code).
 ### Export to other tools
 
 ```
-taste export format:agents     # .dsh/taste/export/AGENTS.taste.md
-taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
+taste export target:agents     # .dsh/taste/export/AGENTS.taste.md
+taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 ```
 
 The fragment lists active rules only, without confidence — safe to paste into an
@@ -174,27 +174,31 @@ The fragment lists active rules only, without confidence — safe to paste into 
 
 ## Configuration
 
-The bundle runs in `regex` mode with **zero model calls** by default. To switch modes,
+The bundle runs with `model.source: none` by default — **zero model calls**. To switch,
 override the row in your profile's `cordis.patch.yml`:
 
 ```yaml
 - id: taste
   name: dsh-code-taste
   config:
-    mode: hybrid
     model:
+      source: custom            # none | host | custom
       format: openai
       baseURL: https://dashscope.aliyuncs.com/compatible-mode/v1
       model: qwen-plus
       apiKeyEnv: DASHSCOPE_API_KEY
 ```
 
-### Modes
+### Which model does the extraction
 
-| mode | model calls | behaviour |
+| `model.source` | Uses | Needs |
 | --- | --- | --- |
-| `regex` (default) | none | explicit instructions and guardrails are written immediately; corrections wait for `taste learn` |
-| `hybrid` | one per batch | a small model turns a batch of signals into rules, throttled and capped |
+| `none` (default) | no model; explicit instructions still land immediately, corrections wait for `taste learn` | nothing |
+| `host` | the harness's current model (the built-in DeepSeek, or whatever you selected) | no endpoint, no key |
+| `custom` | an OpenAI/Anthropic-compatible endpoint — third party or local | `format`, `baseURL`, `model`; local usually needs no key |
+
+`host` is the zero-setup choice: it spends one call of the model you are already using.
+`custom` is how you pin extraction to a cheap model or a local one.
 
 ### Model routes
 
@@ -225,7 +229,7 @@ literal key — `taste config` prints only `env:NAME` or `(inline key set)`.
 
 | Knob | Default | Meaning |
 | --- | --- | --- |
-| `mode` | `regex` | no calls at all |
+| `model.source` | `none` | no calls at all |
 | `extract.minPending` | 3 | this many waiting signals before one call |
 | `extract.throttleMinutes` | 10 | at most one call per session per window |
 | `extract.maxInputChars` | 4000 | ≈1000 tokens in |
@@ -233,10 +237,10 @@ literal key — `taste config` prints only `env:NAME` or `(inline key set)`.
 | `extract.maxRulesPerRun` | 3 | rules accepted per call |
 | `injectBudgetChars` | 3000 | ≈750 tokens of rules per prompt (minimum 400) |
 
-In `regex` mode the only recurring cost is the injected section: about 750 tokens by
+With `source: none` the only recurring cost is the injected section: about 750 tokens by
 default, most of it the fixed preamble. Lower `injectBudgetChars` if you want it tighter.
 
-`taste config` prints the effective mode, budget, route and warnings — never the key.
+`taste config` prints the effective source, budget, route and warnings — never the key.
 
 ## Tools
 
@@ -320,8 +324,8 @@ rules file.
 
 ### Known limits (v0.2.0)
 
-- Extraction is opt-in: `mode: hybrid` is needed for the model to distil corrections. In the
-  default `regex` mode corrections wait for `taste learn`.
+- Extraction is opt-in: `model.source` must be `host` or `custom` for the model to distil
+  corrections. With the default `none`, corrections wait for `taste learn`.
 - No diff learning yet: code you rewrite by hand is not observed (planned, P1).
 - Per-agent prompt scoping depends on the event context; when it is not agent-scoped the
   plugin falls back to one global section and logs that once.

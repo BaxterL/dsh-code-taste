@@ -151,37 +151,41 @@ taste why id:r_8f2a1c
 ### 导出给别的工具
 
 ```
-taste export format:agents     # .dsh/taste/export/AGENTS.taste.md
-taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
+taste export target:agents     # .dsh/taste/export/AGENTS.taste.md
+taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 ```
 
 导出的片段只列生效规则、不带置信度，可以直接贴进 `AGENTS.md` 或 `CLAUDE.md`。
 
 ## 配置
 
-默认是 `regex` 模式，**一次模型调用都没有**。要切换，在你自己 profile 的
+默认 `model.source: none`，**一次模型调用都没有**，纯确定性采集。要切换，在你自己 profile 的
 `cordis.patch.yml` 里覆盖这一行：
 
 ```yaml
 - id: taste
   name: dsh-code-taste
   config:
-    mode: hybrid
     model:
+      source: custom            # none | host | custom
       format: openai
       baseURL: https://dashscope.aliyuncs.com/compatible-mode/v1
       model: qwen-plus
       apiKeyEnv: DASHSCOPE_API_KEY
 ```
 
-### 两种模式
+### 抽取用哪个模型
 
-| mode | 模型调用 | 行为 |
+| `model.source` | 用什么 | 需要填什么 |
 | --- | --- | --- |
-| `regex`（默认） | 无 | 显式指令和禁令立即写入；纠正等你 `taste learn` |
-| `hybrid` | 每批一次 | 用一个小模型把一批信号蒸馏成规则，有节流和上限 |
+| `none`（默认） | 不调模型，显式指令照常写入，纠正等你 `taste learn` | 无 |
+| `host` | 直接用 DSH 当前会话的模型（自带 DeepSeek，或你在设置里选的任何模型） | 无 endpoint、无 key |
+| `custom` | 第三方或本地的 OpenAI / Anthropic 兼容接口 | `format`、`baseURL`、`model`，本地一般不用 key |
 
-### 模型线路
+`host` 是最省事的一档：不额外配置，复用你正在用的模型；代价是抽取调用会占一次你的主模型额度。
+`custom` 适合把它固定到便宜模型或本地小模型上。
+
+### 模型线路（`source: custom` 时）
 
 `format: openai` 走任何 `/chat/completions` 接口：
 
@@ -210,7 +214,7 @@ taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 | 配置项 | 默认 | 含义 |
 | --- | --- | --- |
-| `mode` | `regex` | 完全不调用模型 |
+| `model.source` | `none` | 不调用模型 |
 | `extract.minPending` | 3 | 攒够这么多信号才调一次 |
 | `extract.throttleMinutes` | 10 | 每个会话每个窗口最多一次 |
 | `extract.maxInputChars` | 4000 | 输入约 1000 token |
@@ -218,10 +222,10 @@ taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 | `extract.maxRulesPerRun` | 3 | 单次最多接受的规则数 |
 | `injectBudgetChars` | 3000 | 每轮注入约 750 token（最小 400） |
 
-`regex` 模式下唯一持续的开销就是注入那一段：默认约 750 token，其中大部分是固定的引导语。
+`source: none` 时唯一持续的开销就是注入那一段：默认约 750 token，其中大部分是固定的引导语。
 嫌多可以把 `injectBudgetChars` 调小。
 
-`taste config` 会打印当前模式、预算、线路和警告，**不会打印 key**。
+`taste config` 会打印当前来源、预算、线路和警告，**不会打印 key**。
 
 ## 工具
 
@@ -290,7 +294,7 @@ taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 
 ### 已知限制（v0.2.0）
 
-- 抽取是可选能力：只有 `mode: hybrid` 才会用模型蒸馏纠正；默认的 `regex` 模式下纠正要等 `taste learn`。
+- 抽取是可选能力：只有 `model.source` 设为 `host` 或 `custom` 才会用模型蒸馏纠正；默认 `none` 下纠正要等 `taste learn`。
 - 还不会从代码改动里学：你手改的代码没有被观察（计划在 P1）。
 - 按 agent 隔离的注入依赖事件上下文；拿不到 agent 作用域时会退化成一条全局段落，并打一行日志。
 
