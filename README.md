@@ -1,7 +1,8 @@
 # dsh-code-taste
 
-Teaches DeepSeek Harness **your** coding taste — the way
-[Command Code's taste](https://commandcode.ai/docs/taste) works — and applies it to
+Teaches DeepSeek Harness **your** taste — coding style, aesthetic preferences and the
+habits you keep correcting — the way
+[Command Code's taste](https://commandcode.ai/docs/taste) works, and applies it to
 every session.
 
 Status: **v0.2.0**. Capture, storage, injection, review, export and the tool are
