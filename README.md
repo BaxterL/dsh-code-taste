@@ -1,146 +1,133 @@
 # dsh-code-taste
 
-[English](README.md) | [中文](README.zh.md)
+[English](README.en.md) | 中文
 
-![dsh-code-taste banner](https://baxterl.github.io/assets/dsh-code-taste/banner.png?v=2)
+![dsh-code-taste 横幅](https://baxterl.github.io/assets/dsh-code-taste/banner.png?v=2)
 
-A DeepSeek Harness plugin that learns **your** coding taste — style, aesthetic
-preferences, and the habits you keep correcting — and applies it in every session.
+一个 DeepSeek Harness 插件：让鲸鱼持续学习你的代码品味、审美风格和各种习惯，并在每个会话里照着写。
 
-## What it is
+## 它是什么
 
-Every new session starts from zero: you re-teach `const` over `let`, the 8px corner
-radius, the commit format, the reply language. This plugin listens for those moments,
-turns them into confidence-scored rules, keeps them in a markdown file you can edit by
-hand, and puts the confirmed ones in front of the model at the start of every session.
+新开一个会话，它什么都不记得——你要重新说一遍 `const` 别用 `let`、圆角 8px、commit 怎么排、回复用中文。这个插件专门听这些时刻：把你说的话变成带置信度的规则，存成一份你能手改的 markdown，然后在每个会话开始时把已经确认的那些放到模型面前。
 
-Everything stays on your machine as plain files. No network calls, no telemetry.
+所有东西都是你本机上的纯文本文件，不联网、不埋点。
 
-## Signals
+## 信号
 
-What it learns from, and what it cannot watch yet:
+它从什么里学，以及现在还看不到什么：
 
-| Signal | Looks like | Status |
+| 信号 | 长什么样 | 状态 |
 | --- | --- | --- |
-| Explicit instruction | 记住：以后都用 const | **live** — written at 0.85–0.90 |
-| Guardrail | 永远不要用 moment.js | **live** — 0.88 |
-| Correction | 不要用 any，改成 unknown | **live** — queued at 0.60 for review |
-| Positive feedback | 对，就这样 | **live** — +0.10 to the strongest injected rule |
-| **Accept** | you read the change and keep going | P1 — inferred from the absence of a follow-up edit |
-| **Reject** | you deny a tool call, or revert a change | P1 — tool-decision and workspace-diff hooks |
-| **Edit** | you rewrite what the agent just wrote | P1 — diff between the agent's write and the file afterwards |
-| **Choice** | you pick one of the options it offered | P1 — the answer to a question, or the approach you keep picking |
+| 显式指令 | 记住：以后都用 const | **已支持** — 0.85–0.90 直接写入 |
+| 禁令 | 永远不要用 moment.js | **已支持** — 0.88 |
+| 纠正 | 不要用 any，改成 unknown | **已支持** — 0.60 进待确认 |
+| 正向反馈 | 对，就这样 | **已支持** — 给当前最强那条 +0.10 |
+| **接受** | 你看了改动，直接继续往下做 | P1 — 用“后续没有编辑”推断 |
+| **拒绝** | 你拒绝了工具调用，或把改动撤回 | P1 — 监听工具决策和工作区 diff |
+| **编辑** | 你把 AI 刚写的东西重写了 | P1 — 对比 AI 写入的内容与之后的文件 |
+| **选择** | 你从它给的几个方案里挑了一个 | P1 — 对提问的回答，或你反复选的做法 |
 
-The first four run today. The behavioural four are the honest ones — what you keep, what
-you throw away, what you rewrite — and they are the next release: they need to watch the
-workspace and the tool pipeline instead of only the conversation, so they are built and
-verified separately. See [docs/ROADMAP.md](docs/ROADMAP.md).
+前四条今天就能用。后四条（接受/拒绝/编辑/选择）才是最诚实的信号——你留下什么、扔掉什么、重写什么——也是下一个版本的重点：它们要盯工作区和工具管线，而不只是聊天内容，所以分开做、分开验证。见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
-## Install
+## 安装
 
-### Requirements
+### 环境要求
 
-- DeepSeek Harness `0.2.x` (verified on `0.2.1-rc.2`)
-- Node.js `22.19+` or `24+` (the version DSH itself runs on)
+- DeepSeek Harness `0.2.x`（在 `0.2.1-rc.2` 上验证）
+- Node.js `22.19+` 或 `24+`（就是 DSH 自己跑的那个版本）
 
-No other dependencies — the bundle has none and needs no build step.
+没有其它依赖：这个 bundle 零依赖，也不需要构建。
 
-### From GitHub
+### 从 GitHub 安装
 
 ```sh
 dsh plugin --profile desktop add github:BaxterL/dsh-code-taste
 ```
 
-### From a local checkout
+### 从本地目录安装
 
 ```sh
 git clone https://github.com/BaxterL/dsh-code-taste
 dsh plugin --profile desktop add ./dsh-code-taste
 ```
 
-A local checkout is linked, not copied, so edits take effect after the next restart.
+本地目录是**链接**进去的，不是拷贝，所以改完源码重启一次就生效。
 
-### Let the agent install it
+### 让 DeepSeek 帮你装
 
-Paste this into a DeepSeek Harness session and it will do the work:
+把下面这段直接粘给一个 DeepSeek Harness 会话，它会替你做：
 
 ```
-Install the dsh-code-taste bundle from https://github.com/BaxterL/dsh-code-taste into my current DSH profile.
+把 https://github.com/BaxterL/dsh-code-taste 这个 bundle 装进我当前的 DSH profile。
 
-1. Install it as a bundle — `plugin_manager` with `install_bundle`, target
-   `github:BaxterL/dsh-code-taste`, or `dsh plugin --profile <profile> add github:BaxterL/dsh-code-taste`.
-2. Do not touch any other plugin, bundle, config or workspace file.
-3. Do not restart anything yourself. Tell me whether a restart is required and what it affects.
-4. Afterwards show me the row id, the resolved version, and the exact next steps to verify it.
+1. 用 plugin_manager 的 install_bundle，target 填 `github:BaxterL/dsh-code-taste`；
+   或者执行 `dsh plugin --profile <profile> add github:BaxterL/dsh-code-taste`。
+2. 不要动其它任何插件、bundle、配置或工作区文件。
+3. 不要自己重启。告诉我是否需要重启、会影响什么。
+4. 装完把 row id、解析到的版本号，以及验证步骤告诉我。
 ```
 
-The agent should answer with the row id (`taste`), the version, and `restart-required` when that is the
-case. If it reports `applied`, the bundle is already loaded; otherwise restart and run `taste list`.
+正常情况下它会回答：row id 是 `taste`、版本号是多少、以及 `restart-required`。如果它说 `applied`，说明已经加载；否则重启后再跑一次 `taste list`。
 
-### Restart is required
+### 必须重启
 
-The bundle inserts its row when the host starts. There is no hot reload for a new
-bundle, so **restart DSH** after installing.
+bundle 的行是在宿主启动时插入的，新装 bundle 没有热重载。**装完重启 DSH**。
 
-### Verify
+### 验证
 
-In a new session, ask for the rules:
+新开一个会话，向模型要规则：
 
 ```
 taste list
 ```
 
-An empty workspace answers `No taste rules yet for this workspace.` That means the tool
-is live and nothing has been learned yet. You can also check that
-`<workspace>/.dsh/taste/` appears after the first captured rule.
+空工作区会回答 `No taste rules yet for this workspace.`——说明工具已经挂上，只是还没学到东西。第一条规则被捕获后，`<工作区>/.dsh/taste/` 目录会出现。
 
-### Update
+### 更新
 
 ```sh
-dsh plugin --profile desktop add github:BaxterL/dsh-code-taste   # reinstall latest
+dsh plugin --profile desktop add github:BaxterL/dsh-code-taste   # 重装最新
 ```
 
-then restart. If you installed from a local checkout, `git pull` is enough.
+然后重启。本地目录安装的，`git pull` 就够。
 
-### Uninstall
+### 卸载
 
-Remove the bundle from **Settings → Plugins**, or:
+在 **设置 → 插件** 里移除，或者：
 
 ```sh
 dsh plugin --profile desktop remove dsh-code-taste
 ```
 
-then restart. Your `TASTE.md` files are left untouched — delete `.dsh/taste/` and
-`~/.dsh/taste/` yourself if you want a clean slate.
+然后重启。你的 `TASTE.md` 不会被删——想彻底清空，自己删掉 `.dsh/taste/` 和 `~/.dsh/taste/`。
 
-## Usage
+## 使用
 
-### Teach it by talking
+### 说话就行
 
-| You say | What happens |
+| 你说 | 会发生什么 |
 | --- | --- |
-| 记住：以后都用 const · *remember: always use const* | Written immediately, confidence 0.85–0.90, active |
-| 永远不要用 moment.js · *never use moment.js* | Written immediately as a guardrail, 0.88 |
-| 不要用 any，改成 unknown · *don't use any, use unknown* | Queued as a correction; run `taste learn` to review it |
-| 对，就这样 · *perfect, exactly like that* | Reinforces the strongest rule currently injected (+0.10) |
+| 记住：以后都用 const | 立刻写入，置信度 0.85–0.90，直接生效 |
+| 永远不要用 moment.js | 立刻写入为 guardrail，0.88 |
+| 不要用 any，改成 unknown | 进待处理队列，`taste learn` 复核后才写入 |
+| 对，就这样 | 给当前注入的最强那条 +0.10 |
 
-Questions, one-off instructions ("this time", "for now") and anything containing a
-credential are dropped before they reach the store.
+问句、一次性指令（“这次”“先这样”）、任何含密钥的内容，在进库之前就被丢掉了。
 
-### Review what it picked up
+### 复核它学到的东西
 
-Corrections wait for you instead of polluting the prompt:
+纠正不会直接污染提示词，先等你确认：
 
 ```
 taste review
 taste approve id:r_8f2a1c
 ```
 
-A candidate also promotes itself once it has been seen twice.
+同一条被看到第二次时，也会自己转正。
 
-### Edit the rules by hand
+### 手改规则文件
 
-`<workspace>/.dsh/taste/TASTE.md`
+`<工作区>/.dsh/taste/TASTE.md`
 
 ```markdown
 ## code-style
@@ -150,32 +137,30 @@ A candidate also promotes itself once it has been seen twice.
 - [r_9x8y7z6] 不引入 moment.js @0.72 src:correction ev:3 [pending] [glob:src/ui/**]
 ```
 
-`- [id] text @confidence src:source ev:count [pending|archived] [pinned] [glob:path]`.
-Any line that does not match is treated as a comment, so you can annotate freely.
+格式是 `- [id] 正文 @置信度 src:来源 ev:次数 [pending|archived] [pinned] [glob:路径]`。
+不符合格式的行一律当注释，所以你可以随便加说明。
 
-### Ask why
+### 查看依据
 
 ```
 taste why id:r_8f2a1c
 ```
 
-Prints the evidence records: when it was captured, which signal fired, and the original
-sentence (trimmed to 200 characters, never the surrounding code).
+打印这条规则的证据：什么时候抓到的、触发了哪个信号、原话是什么（截到 200 字，永远不存上下文代码）。
 
-### Export to other tools
+### 导出给别的工具
 
 ```
 taste export format:agents     # .dsh/taste/export/AGENTS.taste.md
 taste export format:claude     # .dsh/taste/export/CLAUDE.taste.md
 ```
 
-The fragment lists active rules only, without confidence — safe to paste into an
-`AGENTS.md` or a `CLAUDE.md`.
+导出的片段只列生效规则、不带置信度，可以直接贴进 `AGENTS.md` 或 `CLAUDE.md`。
 
-## Configuration
+## 配置
 
-The bundle runs in `regex` mode with **zero model calls** by default. To switch modes,
-override the row in your profile's `cordis.patch.yml`:
+默认是 `regex` 模式，**一次模型调用都没有**。要切换，在你自己 profile 的
+`cordis.patch.yml` 里覆盖这一行：
 
 ```yaml
 - id: taste
@@ -189,26 +174,26 @@ override the row in your profile's `cordis.patch.yml`:
       apiKeyEnv: DASHSCOPE_API_KEY
 ```
 
-### Modes
+### 两种模式
 
-| mode | model calls | behaviour |
+| mode | 模型调用 | 行为 |
 | --- | --- | --- |
-| `regex` (default) | none | explicit instructions and guardrails are written immediately; corrections wait for `taste learn` |
-| `hybrid` | one per batch | a small model turns a batch of signals into rules, throttled and capped |
+| `regex`（默认） | 无 | 显式指令和禁令立即写入；纠正等你 `taste learn` |
+| `hybrid` | 每批一次 | 用一个小模型把一批信号蒸馏成规则，有节流和上限 |
 
-### Model routes
+### 模型线路
 
-`format: openai` talks to any `/chat/completions` endpoint:
+`format: openai` 走任何 `/chat/completions` 接口：
 
-| Route | baseURL | example model |
+| 线路 | baseURL | 模型示例 |
 | --- | --- | --- |
-| Qwen / DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
-| Ollama (local) | `http://127.0.0.1:11434/v1` | `qwen2.5-coder:7b` |
-| llama.cpp (local) | `http://127.0.0.1:8080/v1` | whatever `-m` loaded |
-| LM Studio (local) | `http://127.0.0.1:1234/v1` | the loaded model id |
-| vLLM (local) | `http://127.0.0.1:8000/v1` | the served model id |
+| 通义千问 / DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| Ollama（本地） | `http://127.0.0.1:11434/v1` | `qwen2.5-coder:7b` |
+| llama.cpp（本地） | `http://127.0.0.1:8080/v1` | `-m` 加载的那个 |
+| LM Studio（本地） | `http://127.0.0.1:1234/v1` | 加载的模型 id |
+| vLLM（本地） | `http://127.0.0.1:8000/v1` | 服务的模型 id |
 
-`format: anthropic` talks to the Messages API:
+`format: anthropic` 走 Messages API：
 
 ```yaml
       format: anthropic
@@ -217,123 +202,106 @@ override the row in your profile's `cordis.patch.yml`:
       apiKeyEnv: ANTHROPIC_API_KEY
 ```
 
-Local endpoints usually need no key: leave both `apiKey` and `apiKeyEnv` empty.
-`apiKeyEnv` names an environment variable; `apiKey` is a literal fallback. Never commit a
-literal key — `taste config` prints only `env:NAME` or `(inline key set)`.
+本地接口一般不需要 key：`apiKey` 和 `apiKeyEnv` 都留空即可。`apiKeyEnv` 填环境变量名，
+`apiKey` 是直接写死的兜底值。**不要把 key 提交进仓库**——`taste config` 只会显示
+`env:NAME` 或 `(inline key set)`。
 
-### Token budget
+### token 预算
 
-| Knob | Default | Meaning |
+| 配置项 | 默认 | 含义 |
 | --- | --- | --- |
-| `mode` | `regex` | no calls at all |
-| `extract.minPending` | 3 | this many waiting signals before one call |
-| `extract.throttleMinutes` | 10 | at most one call per session per window |
-| `extract.maxInputChars` | 4000 | ≈1000 tokens in |
-| `model.maxOutputTokens` | 256 | hard cap on the reply |
-| `extract.maxRulesPerRun` | 3 | rules accepted per call |
-| `injectBudgetChars` | 3000 | ≈750 tokens of rules per prompt (minimum 400) |
+| `mode` | `regex` | 完全不调用模型 |
+| `extract.minPending` | 3 | 攒够这么多信号才调一次 |
+| `extract.throttleMinutes` | 10 | 每个会话每个窗口最多一次 |
+| `extract.maxInputChars` | 4000 | 输入约 1000 token |
+| `model.maxOutputTokens` | 256 | 输出硬上限 |
+| `extract.maxRulesPerRun` | 3 | 单次最多接受的规则数 |
+| `injectBudgetChars` | 3000 | 每轮注入约 750 token（最小 400） |
 
-In `regex` mode the only recurring cost is the injected section: about 750 tokens by
-default, most of it the fixed preamble. Lower `injectBudgetChars` if you want it tighter.
+`regex` 模式下唯一持续的开销就是注入那一段：默认约 750 token，其中大部分是固定的引导语。
+嫌多可以把 `injectBudgetChars` 调小。
 
-`taste config` prints the effective mode, budget, route and warnings — never the key.
+`taste config` 会打印当前模式、预算、线路和警告，**不会打印 key**。
 
-## Tools
+## 工具
 
-The plugin exposes one tool, `taste`.
+插件只暴露一个工具：`taste`。
 
-| action | parameters | result |
+| action | 参数 | 作用 |
 | --- | --- | --- |
-| `list` | — | every rule with scope, category, confidence, and whether injection is active |
-| `learn` | — | drains this session's pending corrections and asks you to distil the durable ones |
-| `add` | `text`, `category?`, `scope?`, `confidence?`, `glob?` | adds a rule, or reinforces a near-duplicate |
-| `review` | — | pending candidates that are deliberately not injected |
-| `approve` | `id` | promotes a candidate to active |
-| `forget` | `id`, `scope?` | removes a rule from one or both scopes |
-| `why` | `id` | evidence records for one rule |
-| `profile` | — | one-paragraph summary plus the strongest rules |
-| `export` | `format` (`agents` \| `claude`) | writes a markdown fragment under `.dsh/taste/export/` |
+| `list` | — | 列出全部规则：作用域、分类、置信度、是否在注入 |
+| `learn` | — | 取走本会话累积的纠正，交给模型蒸馏 |
+| `add` | `text`、`category?`、`scope?`、`confidence?`、`glob?` | 新增一条，或强化一条近似规则 |
+| `review` | — | 列出待确认候选（这些不会被注入） |
+| `approve` | `id` | 把候选转正 |
+| `forget` | `id`、`scope?` | 从项目/全局里删掉一条 |
+| `why` | `id` | 打印这条规则的证据 |
+| `profile` | — | 一段话的品味画像 + 最强的几条规则 |
+| `export` | `format`（`agents` \| `claude`） | 在 `.dsh/taste/export/` 下生成片段 |
 
-### Parameters
+### 参数说明
 
-- **`text`** — one imperative sentence, ≤ 200 characters. Write it so it still makes sense
-  a month later: "Use const unless reassignment is required", not "change this".
-- **`category`** — `code-style` (default), `design`, `stack`, `workflow`, `project-detail`,
-  `communication`, `avoid`. It only groups rules and labels them in the prompt; it does
-  not change behaviour.
-- **`scope`** — `project` (default) lives in the workspace, `global` applies everywhere.
-  Project rules shadow global rules with the same text.
-- **`confidence`** — `0.1`–`0.95`. Omit it and the source decides: `0.55` for a rule the
-  agent adds, `0.85–0.90` for an explicit instruction. Below `0.55` the rule lands in
-  `pending` and is not injected.
-- **`glob`** — restricts a rule to matching paths, e.g. `src/ui/**`. Stored and shown now;
-  path matching arrives in P2.
-- **`id`** — content-addressed (`r_` plus the first 8 hex characters of the normalized
-  text), so the same rule learned twice resolves to the same id.
+- **`text`** — 一句祈使句，≤ 200 字。写成一个月后还看得懂的样子：“统一用 const，除非需要重新赋值”，而不是“这里改一下”。
+- **`category`** — `code-style`（默认）、`design`、`stack`、`workflow`、`project-detail`、`communication`、`avoid`。只用于分组和在提示词里加标签，不改变行为。
+- **`scope`** — `project`（默认）只在这个工作区生效，`global` 全局生效。同名规则项目覆盖全局。
+- **`confidence`** — `0.1`–`0.95`。不填就按来源定：模型自己加的是 `0.55`，显式指令是 `0.85–0.90`。低于 `0.55` 的进 `pending`，不会注入。
+- **`glob`** — 把规则限定到匹配的路径，比如 `src/ui/**`。目前只存储并展示，路径匹配在 P2 做。
+- **`id`** — 内容寻址（`r_` + 归一化文本的 SHA-1 前 8 位），同一条规则学两次会落到同一个 id，不会分叉。
 
-## Details
+## 细节
 
-### Confidence and lifecycle
+### 置信度与生命周期
 
-| Stage | Rule |
+| 阶段 | 规则 |
 | --- | --- |
-| Base score | explicit 0.85 · guardrail 0.88 · correction 0.60 · agent-added 0.55 |
-| Reinforcement | +0.10 per repeat or positive feedback, capped at 0.95 |
-| Promotion | pending → active on a second piece of evidence or on `approve` |
-| Decay | half-life 60 days measured from `last_used` / `last_seen` |
-| Pinned | `[pinned]` exempts a rule from decay |
-| Archive | effective confidence below 0.25 counts as archived (kept on disk, never injected) |
-| Dedupe | containment similarity ≥ 0.80 after folding 别用/不要用, 改成/换成 … |
+| 基础分 | 显式 0.85 · 禁令 0.88 · 纠正 0.60 · 模型添加 0.55 |
+| 强化 | 每重复一次或收到正向反馈 +0.10，上限 0.95 |
+| 转正 | 第二次证据或手动 `approve` |
+| 衰减 | 半衰期 60 天，从 `last_used` / `last_seen` 算 |
+| 固定 | `[pinned]` 的规则不衰减 |
+| 归档 | 有效置信度低于 0.25 视为归档：留在文件里，永不注入 |
+| 去重 | 同义词折叠后包含度相似 ≥ 0.80 即合并（别用/不要用、改成/换成…） |
 
-### Where things live
+### 文件都在哪
 
-| File | Purpose |
+| 文件 | 用途 |
 | --- | --- |
-| `<workspace>/.dsh/taste/TASTE.md` | project rules — the file you edit |
-| `${DSH_HOME:-~/.dsh}/taste/TASTE.md` | global rules, shared by every workspace |
-| `…/taste/state.json` | timestamps and recall counters (`created`, `last_used`, `recalled`) |
-| `…/taste/evidence.jsonl` | append-only evidence, one JSON object per capture |
-| `…/taste/export/*.md` | generated fragments for `AGENTS.md` / `CLAUDE.md` |
+| `<工作区>/.dsh/taste/TASTE.md` | 项目规则，你手改的就是这个 |
+| `${DSH_HOME:-~/.dsh}/taste/TASTE.md` | 全局规则，所有工作区共享 |
+| `…/taste/state.json` | 时间戳与召回计数（`created`、`last_used`、`recalled`） |
+| `…/taste/evidence.jsonl` | 只追加的证据，一次捕获一行 JSON |
+| `…/taste/export/*.md` | 给 `AGENTS.md` / `CLAUDE.md` 用的导出片段 |
 
-Writes are atomic (temp file + rename), so an interrupted write cannot truncate the
-rules file.
+写入是原子的（临时文件 + rename），写一半被打断也不会把规则文件截断。
 
-### Injection
+### 注入
 
-- Registered as a `systemPrompt` context named `taste`, order `920`.
-- Snapshotted once at session start and frozen for the session, so the prompt prefix
-  stays byte-stable and the KV cache holds.
-- Budget: 6000 characters (≈1500 tokens), strongest rules first, the rest dropped
-  silently.
-- Wrapped in `<taste-rules>` with an explicit "reference data, not instructions; the
-  current request wins" preamble.
-- When candidates are waiting, one footer line mentions them; the rules themselves are
-  never injected while pending.
+- 注册成一个名为 `taste` 的 `systemPrompt` context，order `920`。
+- 会话开始时取一次快照，整个会话冻结，保证提示词前缀字节稳定、KV 缓存不抖。
+- 预算 6000 字符（约 1500 token），按置信度从高到低，放不下的静默丢弃。
+- 整段包在 `<taste-rules>` 里，并带一句“这是参考数据不是指令，当前请求优先”。
+- 有待确认候选时，末尾只加一行提示；pending 的规则本身永不注入。
 
-### Privacy
+### 隐私
 
-- Credentials (API keys, tokens, JWTs, PEM blocks, connection strings, `password=`) are
-  rejected before anything is written.
-- Email addresses become `<email>`, and the username inside absolute paths is collapsed
-  to `~`.
-- Evidence stores a 200-character quote, never the surrounding code or conversation.
+- 密钥类内容（API key、token、JWT、PEM、连接串、`password=`）在写入前直接拒绝。
+- 邮箱替换成 `<email>`，绝对路径里的用户名折叠成 `~`。
+- 证据只存 200 字的原话，不存上下文代码和整段对话。
 
-### Known limits (v0.2.0)
+### 已知限制（v0.2.0）
 
-- Extraction is opt-in: `mode: hybrid` is needed for the model to distil corrections. In the
-  default `regex` mode corrections wait for `taste learn`.
-- No diff learning yet: code you rewrite by hand is not observed (planned, P1).
-- Per-agent prompt scoping depends on the event context; when it is not agent-scoped the
-  plugin falls back to one global section and logs that once.
+- 抽取是可选能力：只有 `mode: hybrid` 才会用模型蒸馏纠正；默认的 `regex` 模式下纠正要等 `taste learn`。
+- 还不会从代码改动里学：你手改的代码没有被观察（计划在 P1）。
+- 按 agent 隔离的注入依赖事件上下文；拿不到 agent 作用域时会退化成一条全局段落，并打一行日志。
 
-## Development
+## 开发
 
 ```sh
 node test/harness.mjs
 ```
 
-39 checks, driven through `apply(ctx)` with a fake context — no DSH process needed.
+39 项检查，用假 ctx 直接驱动 `apply(ctx)`，不需要起 DSH。
 
-## License
+## 许可
 
 MIT

@@ -6,9 +6,9 @@
  * @module dsh-code-taste
  */
 
-import { readFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { tasteDir, writeAtomic } from './lib/paths.js'
+import { dshHome, tasteDir, writeAtomic } from './lib/paths.js'
 import {
   appendEvidence,
   contentId,
@@ -74,6 +74,34 @@ function createSessionIdentity() {
  * @param {object} [rawConfig] - the row's config: mode, injection budget, model route.
  */
 export function apply(ctx, rawConfig) {
+  try {
+    start(ctx, rawConfig)
+  } catch (error) {
+    reportBootError(ctx, error, 'apply')
+  }
+}
+
+/**
+ * Record a boot failure where the user can find it: the host only reports
+ * "failed", so a stack in ~/.dsh/taste/boot-error.log is the only lead.
+ */
+function reportBootError(ctx, error, stage) {
+  const message = `[${new Date().toISOString()}] ${stage}: ${error?.stack ?? String(error)}`
+  try {
+    ctx.logger?.warn?.('taste boot failed: %s', message)
+  } catch {
+    // logging must never be the thing that fails
+  }
+  try {
+    const dir = join(dshHome(), 'taste')
+    mkdirSync(dir, { recursive: true })
+    appendFileSync(join(dir, 'boot-error.log'), `${message}\n`)
+  } catch {
+    // a read-only home is not worth crashing for
+  }
+}
+
+function start(ctx, rawConfig) {
   const { config, warnings } = resolveConfig(rawConfig)
   if (warnings.length > 0) ctx.logger?.warn?.('taste: %s', warnings.join('; '))
   const sessionIdOf = createSessionIdentity()
@@ -403,7 +431,12 @@ export function apply(ctx, rawConfig) {
     maybeExtract(sessionIdOf(session), cwdOf(session))
   })
 
-  ctx.tools.register(
+  const tools = ctx.get?.('tools') ?? ctx.tools
+  if (typeof tools?.register !== 'function') {
+    reportBootError(ctx, new Error('tools service is unavailable at apply time'), 'tool-registration')
+    return
+  }
+  tools.register(
     createTasteTool({
       cwdOf,
       sessionIdOf,

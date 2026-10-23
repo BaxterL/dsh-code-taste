@@ -72,6 +72,6 @@ users upgrade with `dsh plugin add dsh-code-taste@0.3.1`.
 
 - [ ] `node test/harness.mjs` passes
 - [ ] `npm pack --dry-run` contains `index.js`, `lib/*.js`, `cordis.patch.yml`, `locale/*`, `icon.svg`, both READMEs, `LICENSE`
-- [ ] `README.md` and `README.zh.md` describe the current version
+- [ ] `README.md` (Chinese) and `README.en.md` describe the current version
 - [ ] the banner URL still resolves (`https://baxterl.github.io/assets/dsh-code-taste/banner.png`)
 - [ ] `taste config` shows the default `mode: regex`
