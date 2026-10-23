@@ -1,34 +1,50 @@
 {
-    "name":  "dsh-code-taste",
-    "version":  "0.3.0",
-    "private":  true,
-    "type":  "module",
-    "description":  "Learns your coding taste from explicit instructions and corrections, stores it as confidence-scored rules in editable markdown, and injects them into every session.",
-    "exports":  {
-                    ".":  "./index.js",
-                    "./locale/*.json":  "./locale/*.json",
-                    "./icon":  "./icon.svg"
-                },
-    "files":  [
-                  "index.js",
-                  "lib/*.js",
-                  "cordis.patch.yml",
-                  "locale/*.json",
-                  "icon.svg",
-                  "README.md",
-                  "LICENSE"
-              ],
-    "dsh":  {
-                "bundle":  {
-                               "patch":  "./cordis.patch.yml"
-                           }
-            },
-    "keywords":  [
-                     "dsh-plugin",
-                     "deepseek-harness",
-                     "taste",
-                     "coding-style",
-                     "preferences"
-                 ],
-    "license":  "MIT"
+  "name": "dsh-code-taste",
+  "version": "0.3.0",
+  "description": "Learns your coding taste from explicit instructions and corrections, stores it as confidence-scored rules in editable markdown, and injects them into every session.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "taste",
+    "coding-style",
+    "conventions",
+    "preferences"
+  ],
+  "author": "BaxterL",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BaxterL/dsh-code-taste.git"
+  },
+  "homepage": "https://github.com/BaxterL/dsh-code-taste#readme",
+  "bugs": {
+    "url": "https://github.com/BaxterL/dsh-code-taste/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
 }
