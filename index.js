@@ -6,10 +6,12 @@
  * @module dsh-code-taste
  */
 
-import { randomUUID } from 'node:crypto'
-import { tasteDir } from './lib/paths.js'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tasteDir, writeAtomic } from './lib/paths.js'
 import {
   appendEvidence,
+  contentId,
   identityOf,
   loadScope,
   loadScopeSync,
@@ -18,10 +20,12 @@ import {
   mergeScopes,
   parseMarkdown,
   readEvidence,
+  renderMarkdown,
   saveScope,
   saveState,
+  similarity,
 } from './lib/store.js'
-import { classify, inferCategory, prefilter, toRuleText } from './lib/signals.js'
+import { baseConfidence, classify, inferCategory, prefilter, toRuleText } from './lib/signals.js'
 import { renderPrompt, selectRules } from './lib/inject.js'
 import { createTasteTool } from './lib/tool.js'
 
@@ -29,10 +33,11 @@ export const name = 'taste'
 export const inject = ['tools', 'systemPrompt', 'workingDirectory']
 
 const MAX_PENDING = 20
-const EXPLICIT_CONFIDENCE = 0.85
 const AUTO_CONFIDENCE = 0.5
 const REINFORCE_STEP = 0.1
+const APPROVE_STEP = 0.05
 const CONFIDENCE_CEILING = 0.95
+const SIMILARITY_MERGE = 0.8
 
 /** @returns {string} plain text of a user message's content blocks. */
 function messageText(message) {
@@ -71,8 +76,10 @@ export function apply(ctx) {
   const pending = new Map()
   /** session id -> frozen merged rules */
   const snapshots = new Map()
-  /** session id -> ids rendered into the prompt */
-  const injected = new Map()
+  /** session id -> working directory the snapshot was built from */
+  const cwds = new Map()
+  /** session id -> ids already counted as used */
+  const used = new Map()
   let fallbackRegistered = false
   let fallbackSessionId
 
@@ -90,7 +97,12 @@ export function apply(ctx) {
     rules.map(rule => {
       const record = state[rule.id]
       if (!record) return rule
-      return { ...rule, created: record.created, lastSeen: record.lastSeen }
+      return {
+        ...rule,
+        created: record.created,
+        lastSeen: record.lastSeen,
+        lastUsed: record.lastUsed,
+      }
     })
 
   const mergeFor = cwd => {
@@ -102,7 +114,44 @@ export function apply(ctx) {
   }
 
   const refresh = (sessionId, cwd) => {
+    cwds.set(sessionId, cwd)
     snapshots.set(sessionId, mergeFor(cwd))
+  }
+
+  /** Rebuild every live session snapshot that belongs to one workspace. */
+  const refreshWorkspace = cwd => {
+    for (const [sessionId, path] of cwds) {
+      if (path === cwd) snapshots.set(sessionId, mergeFor(cwd))
+    }
+  }
+
+  const renderFor = sessionId => {
+    const rules = snapshots.get(sessionId) ?? []
+    const pendingCount = rules.filter(rule => rule.status === 'pending').length
+    markUsed(sessionId, rules)
+    return renderPrompt(rules, { pendingCount })
+  }
+
+  const markUsed = (sessionId, rules) => {
+    const cwd = cwds.get(sessionId)
+    if (cwd === undefined) return
+    const chosen = selectRules(rules)
+    if (chosen.length === 0) return
+    for (const rule of chosen) {
+      const dir = tasteDir(cwd, rule.scope === 'global' ? 'global' : 'project')
+      // usage is best-effort bookkeeping; a failure must never break assembly
+      loadState(dir)
+        .then(state => {
+          const record = state[rule.id] ?? { created: new Date().toISOString() }
+          state[rule.id] = {
+            ...record,
+            lastUsed: new Date().toISOString(),
+            recalled: (record.recalled ?? 0) + 1,
+          }
+          return saveState(dir, state)
+        })
+        .catch(() => {})
+    }
   }
 
   const registerContext = (scoped, sessionId) => {
@@ -133,11 +182,14 @@ export function apply(ctx) {
     }
   }
 
-  const renderFor = sessionId => {
-    const rules = snapshots.get(sessionId) ?? []
-    const text = renderPrompt(rules)
-    injected.set(sessionId, selectRules(rules).map(rule => rule.id))
-    return text
+  const findRule = async (cwd, id) => {
+    for (const scope of ['project', 'global']) {
+      const dir = tasteDir(cwd, scope)
+      const rules = await loadScope(dir, scope)
+      const rule = rules.find(candidate => candidate.id === id)
+      if (rule) return { dir, scope, rules, rule }
+    }
+    return undefined
   }
 
   const addRule = async (cwd, input) => {
@@ -146,29 +198,43 @@ export function apply(ctx) {
     const rules = await loadScope(dir, scope)
     const state = await loadState(dir)
     const identity = identityOf(input.text)
-    const existing = rules.find(rule => identityOf(rule.text) === identity)
+    let existing = rules.find(rule => identityOf(rule.text) === identity)
+    if (!existing) {
+      let best = 0
+      for (const rule of rules) {
+        const score = similarity(rule.text, input.text)
+        if (score > best) {
+          best = score
+          existing = rule
+        }
+      }
+      if (best < SIMILARITY_MERGE) existing = undefined
+    }
     const now = new Date().toISOString()
+    const base = typeof input.confidence === 'number' ? input.confidence : baseConfidence(input.kind)
     let rule
+    let created = false
     if (existing) {
       existing.confidence = Math.min(CONFIDENCE_CEILING, existing.confidence + REINFORCE_STEP)
       existing.evidenceCount += 1
-      existing.status = 'active'
+      if (existing.evidenceCount >= 2) existing.status = 'active'
       if (input.category) existing.category = input.category
       if (input.glob) existing.glob = input.glob
       state[existing.id] = { created: state[existing.id]?.created ?? now, lastSeen: now }
       rule = existing
     } else {
-      const confidence = typeof input.confidence === 'number' ? input.confidence : AUTO_CONFIDENCE
+      created = true
       rule = {
-        id: `r_${randomUUID().slice(0, 8)}`,
+        id: contentId(input.text),
         text: input.text,
         category: input.category || inferCategory(input.text),
         scope,
         glob: input.glob,
-        confidence: Math.min(CONFIDENCE_CEILING, Math.max(0.1, confidence)),
+        confidence: Math.min(CONFIDENCE_CEILING, Math.max(0.1, base)),
         evidenceCount: 1,
-        source: input.source ?? 'explicit',
-        status: confidence >= 0.55 ? 'active' : 'pending',
+        source: input.source ?? input.kind ?? 'explicit',
+        status: base >= 0.55 ? 'active' : 'pending',
+        pinned: input.pinned === true,
         ineffective: 0,
       }
       state[rule.id] = { created: now, lastSeen: now }
@@ -180,28 +246,39 @@ export function apply(ctx) {
       id: rule.id,
       at: now,
       kind: input.kind ?? 'explicit',
+      patterns: input.patterns,
       quote: String(input.quote ?? input.text).slice(0, 200),
     })
-    return { rule, created: existing === undefined }
+    return { rule, created }
   }
 
   const reinforceRule = async (cwd, id) => {
-    for (const scope of ['project', 'global']) {
-      const dir = tasteDir(cwd, scope)
-      const rules = await loadScope(dir, scope)
-      const rule = rules.find(candidate => candidate.id === id)
-      if (!rule) continue
-      rule.confidence = Math.min(CONFIDENCE_CEILING, rule.confidence + REINFORCE_STEP)
-      rule.evidenceCount += 1
-      rule.status = 'active'
-      const state = await loadState(dir)
-      state[id] = { created: state[id]?.created ?? new Date().toISOString(), lastSeen: new Date().toISOString() }
-      await saveScope(dir, scope, rules)
-      await saveState(dir, state)
-      await appendEvidence(dir, { id, at: new Date().toISOString(), kind: 'positive', quote: 'positive feedback' })
-      return true
-    }
-    return false
+    const found = await findRule(cwd, id)
+    if (!found) return false
+    const { dir, scope, rules, rule } = found
+    rule.confidence = Math.min(CONFIDENCE_CEILING, rule.confidence + REINFORCE_STEP)
+    rule.evidenceCount += 1
+    rule.status = 'active'
+    const state = await loadState(dir)
+    state[id] = { created: state[id]?.created ?? new Date().toISOString(), lastSeen: new Date().toISOString() }
+    await saveScope(dir, scope, rules)
+    await saveState(dir, state)
+    await appendEvidence(dir, { id, at: new Date().toISOString(), kind: 'positive', quote: 'positive feedback' })
+    return true
+  }
+
+  const approveRule = async (cwd, id) => {
+    const found = await findRule(cwd, id)
+    if (!found) return false
+    const { dir, scope, rules, rule } = found
+    rule.status = 'active'
+    rule.confidence = Math.min(CONFIDENCE_CEILING, Math.max(rule.confidence, 0.6) + APPROVE_STEP)
+    const state = await loadState(dir)
+    state[id] = { created: state[id]?.created ?? new Date().toISOString(), lastSeen: new Date().toISOString() }
+    await saveScope(dir, scope, rules)
+    await saveState(dir, state)
+    await appendEvidence(dir, { id, at: new Date().toISOString(), kind: 'approved', quote: 'approved by user' })
+    return true
   }
 
   const forgetRule = async (cwd, id, requestedScope) => {
@@ -221,13 +298,29 @@ export function apply(ctx) {
     return removed
   }
 
+  const exportTaste = async (cwd, format) => {
+    const rules = mergeFor(cwd).filter(rule => rule.status === 'active')
+    if (rules.length === 0) return undefined
+    const body = [
+      '# Coding conventions',
+      '',
+      'Learned from this user\'s own corrections. Generated by dsh-taste; edit the rules in `.dsh/taste/TASTE.md` instead.',
+      '',
+      ...rules.map(rule => `- ${rule.text}`),
+      '',
+    ].join('\n')
+    const name = format === 'claude' ? 'CLAUDE.taste.md' : 'AGENTS.taste.md'
+    const path = join(tasteDir(cwd, 'project'), 'export', name)
+    await writeAtomic(path, body)
+    return path
+  }
+
   ctx.on('agent/created', function (payload) {
     const session = payload?.agent?.session
     if (!session) return
     const sessionId = sessionIdOf(session)
-    const cwd = cwdOf(session)
     try {
-      refresh(sessionId, cwd)
+      refresh(sessionId, cwdOf(session))
       registerContext(this, sessionId)
     } catch (error) {
       ctx.logger?.warn?.('taste: session initialisation failed: %o', error)
@@ -237,17 +330,16 @@ export function apply(ctx) {
   ctx.on('agent/inbox/claimed', payload => {
     const session = payload?.agent?.session
     if (!session) return
-    const raw = messageText(payload?.message)
-    const filtered = prefilter(raw)
+    const filtered = prefilter(messageText(payload?.message))
     if (!filtered.ok) return
-    const kind = classify(filtered.text)
-    if (kind === null) return
+    const signal = classify(filtered.text)
+    if (signal === null) return
     const sessionId = sessionIdOf(session)
     const cwd = cwdOf(session)
 
-    if (kind === 'positive') {
-      const ids = injected.get(sessionId) ?? []
-      const target = ids[0]
+    if (signal.kind === 'positive') {
+      const rules = snapshots.get(sessionId) ?? []
+      const target = selectRules(rules)[0]?.id
       if (target !== undefined) {
         reinforceRule(cwd, target)
           .then(() => refresh(sessionId, cwd))
@@ -257,17 +349,17 @@ export function apply(ctx) {
     }
 
     const queue = pending.get(sessionId) ?? []
-    queue.push({ text: filtered.text, kind, at: new Date().toISOString() })
+    queue.push({ text: filtered.text, kind: signal.kind, patterns: signal.patterns, at: new Date().toISOString() })
     while (queue.length > MAX_PENDING) queue.shift()
     pending.set(sessionId, queue)
 
-    if (kind === 'explicit') {
-      const body = toRuleText(filtered.text)
+    if (signal.kind === 'explicit' || signal.kind === 'guardrail') {
       addRule(cwd, {
-        text: body,
-        confidence: EXPLICIT_CONFIDENCE,
-        source: 'explicit',
-        kind: 'explicit',
+        text: toRuleText(filtered.text),
+        kind: signal.kind,
+        patterns: signal.patterns,
+        confidence: signal.weight,
+        source: signal.kind,
         quote: filtered.text,
       })
         .then(() => refresh(sessionId, cwd))
@@ -280,8 +372,22 @@ export function apply(ctx) {
       cwdOf,
       sessionIdOf,
       readMerged: async cwd => mergeFor(cwd),
-      addRule,
-      forgetRule,
+      addRule: async (cwd, input) => {
+        const result = await addRule(cwd, input)
+        refreshWorkspace(cwd)
+        return result
+      },
+      approveRule: async (cwd, id) => {
+        const result = await approveRule(cwd, id)
+        refreshWorkspace(cwd)
+        return result
+      },
+      forgetRule: async (cwd, id, scope) => {
+        const result = await forgetRule(cwd, id, scope)
+        refreshWorkspace(cwd)
+        return result
+      },
+      exportTaste,
       evidenceFor: async (cwd, id) => {
         const project = await readEvidence(tasteDir(cwd, 'project'), id)
         const global = await readEvidence(tasteDir(cwd, 'global'), id)
@@ -296,4 +402,4 @@ export function apply(ctx) {
   )
 }
 
-export { parseMarkdown }
+export { contentId, parseMarkdown, renderMarkdown, similarity }
