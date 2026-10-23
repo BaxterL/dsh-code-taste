@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-taste",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Learns your coding taste from explicit instructions and corrections, stores it as confidence-scored rules in editable markdown, and injects them into every session.",
   "type": "module",
   "exports": {
@@ -18,6 +18,9 @@
     "README.en.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
