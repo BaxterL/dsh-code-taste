@@ -1,10 +1,11 @@
 /**
  * Client half: the configuration card on the plugin's own page
- * (Plugins → Installed → dsh-code-taste).
+ * (Plugins → Installed → 鲸味).
  *
- * Hand-written in the browser module format — no build step. React comes from
- * the module table; configuration reads and writes go through the host-owned
- * `configForms` controller, so nothing here talks to the network directly.
+ * Hand-written in the browser module format — no build step. Reads and writes go
+ * to the host route `/dsh-code-taste/config`, which stores them in
+ * `~/.dsh/taste/settings.json`. This follows the plugin market's pattern: the
+ * card owns its own state instead of depending on the settings form service.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-code-taste',
@@ -13,15 +14,7 @@ window.__ModuleLoader__.load({
     var exports = module.exports
     const React = require('react')
 
-    /** Namespace of the host entry this card configures: the package name. */
-    const NS = 'dsh-code-taste'
-
-    /**
-     * The configForms namespace is the host entry id. For a bundle that is the
-     * package name, but our patch row is `taste`, so ask for both and take
-     * whichever the host actually serves.
-     */
-    const NS_CANDIDATES = [NS, 'taste']
+    const ENDPOINT = '/dsh-code-taste/config'
 
     const SOURCES = [
       ['none', '不使用模型（只做确定性采集）'],
@@ -44,8 +37,7 @@ window.__ModuleLoader__.load({
       ['maxRulesPerRun', '单次最多接受几条规则', ''],
     ]
 
-    const box = { display: 'grid', gap: 10, margin: '10px 0 4px' }
-    const row = { display: 'grid', gridTemplateColumns: 'minmax(180px, 260px) 1fr', gap: 12, alignItems: 'center' }
+    const row = { display: 'grid', gridTemplateColumns: 'minmax(180px, 260px) 1fr', gap: 12, alignItems: 'center', margin: '8px 0' }
     const label = { fontSize: 13, opacity: 0.85 }
     const hint = { fontSize: 11.5, opacity: 0.55, marginTop: 2 }
     const control = {
@@ -59,39 +51,7 @@ window.__ModuleLoader__.load({
       width: '100%',
       boxSizing: 'border-box',
     }
-    const sectionTitle = { fontSize: 12, letterSpacing: 1, opacity: 0.6, margin: '14px 0 2px' }
-
-    /** Read one snapshot from the controller, tolerating a not-yet-mounted form. */
-    function readSnapshot(form) {
-      if (form && typeof form.getSnapshot === 'function') {
-        try {
-          const snapshot = form.getSnapshot()
-          if (snapshot && typeof snapshot === 'object') return snapshot
-        } catch {
-          // fall through
-        }
-      }
-      return { value: {}, writable: false }
-    }
-
-    /** Subscribe to the controller; re-renders when the host value changes. */
-    function useFormState(form) {
-      const [snapshot, setSnapshot] = React.useState(() => readSnapshot(form))
-      React.useEffect(() => {
-        if (!form || typeof form.subscribe !== 'function') return undefined
-        let alive = true
-        const sync = () => {
-          if (alive) setSnapshot(readSnapshot(form))
-        }
-        sync()
-        const dispose = form.subscribe(sync)
-        return () => {
-          alive = false
-          if (typeof dispose === 'function') dispose()
-        }
-      }, [form])
-      return snapshot
-    }
+    const sectionTitle = { fontSize: 12, letterSpacing: 1, opacity: 0.6, margin: '16px 0 2px' }
 
     function Field(props) {
       return React.createElement(
@@ -108,31 +68,62 @@ window.__ModuleLoader__.load({
     }
 
     function SettingsCard(props) {
-      const form = props.form
-      const snapshot = useFormState(form)
-      const value = (snapshot && snapshot.value) || {}
-      const writable = snapshot ? snapshot.writable !== false : true
-      const view = props.view
-      const source = typeof value.source === 'string' ? value.source : 'none'
-      const format = typeof value.format === 'string' ? value.format : 'openai'
+      const [value, setValue] = React.useState(null)
+      const [error, setError] = React.useState('')
 
-      const set = (key, next) => {
-        if (!writable) return
-        if (typeof props.onSet === 'function') props.onSet(key, next)
+      React.useEffect(() => {
+        let alive = true
+        fetch(ENDPOINT, { cache: 'no-store' })
+          .then(response => response.json())
+          .then(body => {
+            if (alive) setValue(body)
+          })
+          .catch(cause => {
+            if (alive) setError(String(cause && cause.message ? cause.message : cause))
+          })
+        return () => {
+          alive = false
+        }
+      }, [])
+
+      const save = (field, next) => {
+        setValue(current => (current ? { ...current, [field]: next } : current))
+        fetch(ENDPOINT, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ field, value: next }),
+        })
+          .then(response => response.json())
+          .then(body => {
+            if (body && body.error) setError(String(body.error))
+            else {
+              setError('')
+              setValue(body)
+            }
+          })
+          .catch(cause => setError(String(cause && cause.message ? cause.message : cause)))
       }
 
-      if (view === 'summary') {
-        const text = source === 'none'
+      if (props && props.view === 'summary') {
+        if (!value) return null
+        const text = value.source === 'none'
           ? '抽取模型：不使用（零调用）'
-          : source === 'host'
+          : value.source === 'host'
             ? '抽取模型：跟随当前会话'
-            : `抽取模型：${format} · ${value.baseURL || '未填地址'}`
+            : `抽取模型：${value.format} · ${value.baseURL || '未填地址'}`
         return React.createElement('div', { style: { fontSize: 12.5, opacity: 0.75 } }, text)
       }
 
+      if (!value) {
+        return React.createElement('div', { style: { fontSize: 12.5, opacity: 0.6, padding: '8px 0' } }, error || '加载中…')
+      }
+
+      const source = value.source || 'none'
+      const format = value.format || 'openai'
+
       return React.createElement(
         'div',
-        { style: { padding: '4px 0 12px' } },
+        { style: { padding: '4px 0 14px' } },
         React.createElement('div', { style: sectionTitle }, '抽取模型'),
 
         React.createElement(
@@ -140,12 +131,7 @@ window.__ModuleLoader__.load({
           { title: '模型来源' },
           React.createElement(
             'select',
-            {
-              style: control,
-              value: source,
-              disabled: !writable,
-              onChange: event => set('source', event.target.value),
-            },
+            { style: control, value: source, onChange: event => save('source', event.target.value) },
             SOURCES.map(([key, text]) => React.createElement('option', { key, value: key }, text)),
           ),
         ),
@@ -159,12 +145,7 @@ window.__ModuleLoader__.load({
                 { title: '接口格式' },
                 React.createElement(
                   'select',
-                  {
-                    style: control,
-                    value: format,
-                    disabled: !writable,
-                    onChange: event => set('format', event.target.value),
-                  },
+                  { style: control, value: format, onChange: event => save('format', event.target.value) },
                   FORMATS.map(([key, text]) => React.createElement('option', { key, value: key }, text)),
                 ),
               ),
@@ -175,9 +156,9 @@ window.__ModuleLoader__.load({
                   style: control,
                   type: 'text',
                   value: value.baseURL || '',
-                  disabled: !writable,
                   placeholder: 'https://…/v1',
-                  onChange: event => set('baseURL', event.target.value),
+                  onChange: event => setValue(current => ({ ...current, baseURL: event.target.value })),
+                  onBlur: event => save('baseURL', event.target.value),
                 }),
               ),
               React.createElement(
@@ -187,21 +168,21 @@ window.__ModuleLoader__.load({
                   style: control,
                   type: 'text',
                   value: value.modelId || '',
-                  disabled: !writable,
                   placeholder: 'qwen-plus',
-                  onChange: event => set('modelId', event.target.value),
+                  onChange: event => setValue(current => ({ ...current, modelId: event.target.value })),
+                  onBlur: event => save('modelId', event.target.value),
                 }),
               ),
               React.createElement(
                 Field,
-                { title: 'Key 环境变量', hintText: '本地模型一般留空；不要在这里直接写 key' },
+                { title: 'Key 环境变量', hintText: '本地模型一般留空' },
                 React.createElement('input', {
                   style: control,
                   type: 'text',
                   value: value.apiKeyEnv || '',
-                  disabled: !writable,
                   placeholder: 'DASHSCOPE_API_KEY',
-                  onChange: event => set('apiKeyEnv', event.target.value),
+                  onChange: event => setValue(current => ({ ...current, apiKeyEnv: event.target.value })),
+                  onBlur: event => save('apiKeyEnv', event.target.value),
                 }),
               ),
             )
@@ -217,68 +198,38 @@ window.__ModuleLoader__.load({
               style: control,
               type: 'number',
               value: value[key] ?? '',
-              disabled: !writable,
               onChange: event => {
                 const parsed = Number.parseFloat(event.target.value)
-                set(key, Number.isFinite(parsed) ? parsed : 0)
+                setValue(current => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : 0 }))
+              },
+              onBlur: event => {
+                const parsed = Number.parseFloat(event.target.value)
+                if (Number.isFinite(parsed)) save(key, parsed)
               },
             }),
           ),
         ),
 
-        React.createElement(
-          'div',
-          { style: { ...hint, marginTop: 12 } },
-          '保存后下一次会话生效；规则文件在 ~/.dsh/taste/TASTE.md（全局）或 <工作区>/.dsh/taste/TASTE.md（项目）。',
+        error
+          ? React.createElement('div', { style: { ...hint, color: '#e06c75', marginTop: 10 } }, `保存失败：${error}`)
+          : React.createElement(
+              'div',
+              { style: { ...hint, marginTop: 12 } },
+              '改完即生效。规则文件在 ~/.dsh/taste/TASTE.md（全局）或 <工作区>/.dsh/taste/TASTE.md（项目）。',
+            ),
+      )
+    }
+
+    /** Client entry point: one card on the bundle's page. */
+    function apply(ctx) {
+      ctx.slots.inject('plugins.bundle.config', () =>
+        ctx.slots.register(
+          { name: 'plugins.bundle.config', key: 'dsh-code-taste' },
+          SettingsCard,
         ),
       )
     }
 
-    /** Client entry point: one card, guarded by whether the host serves this namespace. */
-    function apply(ctx) {
-      if (typeof console !== 'undefined' && console.info) {
-        console.info('[dsh-code-taste] client card applying; configForms =', Boolean(ctx.configForms))
-      }
-      if (!ctx.configForms || typeof ctx.configForms.whileServed !== 'function') {
-        if (typeof console !== 'undefined' && console.warn) {
-          console.warn('[dsh-code-taste] configForms 服务不可用，设置卡片未注册（宿主功能不受影响）')
-        }
-        return
-      }
-
-      const inject = () => {
-        let form = null
-        for (const id of NS_CANDIDATES) {
-          if (form) break
-          try {
-            form = ctx.configForms.get(id)
-          } catch {
-            form = null
-          }
-        }
-        return {
-          form,
-          onSet: (field, next) =>
-            form && typeof form.set === 'function' ? form.set(field, next) : Promise.resolve(false),
-          onUnset: field =>
-            form && typeof form.unset === 'function' ? form.unset(field) : Promise.resolve(false),
-        }
-      }
-
-      ctx.effect(
-        () =>
-          ctx.configForms.whileServed(NS_CANDIDATES, () =>
-            ctx.slots.inject('plugins.bundle.config', () =>
-              ctx.slots.register(
-                { name: 'plugins.bundle.config', key: NS, inject },
-                SettingsCard,
-              ),
-            ),
-          ),
-        'dsh-code-taste: settings card',
-      )
-    }
-
-    return { inject: ['slots', 'configForms'], apply }
+    return { inject: ['slots'], apply }
   },
 })

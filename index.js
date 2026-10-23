@@ -28,6 +28,7 @@ import {
 import { baseConfidence, classify, inferCategory, prefilter, toRuleText } from './lib/signals.js'
 import { renderPrompt, selectRules } from './lib/inject.js'
 import { canExtract, describeConfig, resolveConfig } from './lib/config.js'
+import { coerceField, readSettings, toPublicConfig, writeSettings } from './lib/settings.js'
 import { complete, completeWithHost } from './lib/llm.js'
 import { runExtraction } from './lib/extract.js'
 import { createTasteTool } from './lib/tool.js'
@@ -128,8 +129,82 @@ function reportBootError(ctx, error, stage) {
 }
 
 function start(ctx, rawConfig) {
-  const { config, warnings } = resolveConfig(rawConfig)
+  const stored = readSettings()
+  const { config, warnings } = resolveConfig({ ...(rawConfig ?? {}), ...stored })
   if (warnings.length > 0) ctx.logger?.warn?.('taste: %s', warnings.join('; '))
+
+  /**
+   * One route for the settings card: read the effective values, write one field.
+   * The card is a browser request, so the file it writes is settings.json, never
+   * the profile patch.
+   */
+  const registerSettingsRoute = () => {
+    const webServer = ctx.get?.('webServer')
+    if (!webServer || typeof webServer.register !== 'function') {
+      ctx.logger?.warn?.('taste: webServer service is unavailable; the settings card cannot save')
+      return
+    }
+    const send = (response, status, body) => {
+      response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      response.end(JSON.stringify(body))
+    }
+    const readBody = request =>
+      new Promise((resolve, reject) => {
+        let data = ''
+        request.on('data', chunk => {
+          data += chunk
+          if (data.length > 65536) {
+            reject(new Error('body too large'))
+            request.destroy()
+          }
+        })
+        request.on('end', () => resolve(data))
+        request.on('error', reject)
+      })
+    const reapply = merged => {
+      const next = resolveConfig({ ...(rawConfig ?? {}), ...merged }).config
+      Object.assign(config, next)
+    }
+    ctx.effect(
+      () =>
+        webServer.register({
+          kind: 'exact',
+          path: '/dsh-code-taste/config',
+          handler: async (request, response) => {
+            if (request.method === 'GET') {
+              send(response, 200, toPublicConfig(config))
+              return
+            }
+            if (request.method !== 'POST') {
+              response.writeHead(405, { allow: 'GET, POST' })
+              response.end()
+              return
+            }
+            try {
+              const body = JSON.parse(await readBody(request))
+              const result = coerceField(body.field, body.value)
+              if (!result.ok) {
+                send(response, 400, { error: result.error })
+                return
+              }
+              const merged = { ...readSettings(), [body.field]: result.value }
+              writeSettings(merged)
+              reapply(merged)
+              send(response, 200, toPublicConfig(config))
+            } catch (error) {
+              send(response, 400, { error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      'taste: settings route',
+    )
+  }
+  try {
+    registerSettingsRoute()
+  } catch (error) {
+    reportBootError(ctx, error, 'settings-route')
+  }
+
   const sessionIdOf = createSessionIdentity()
   /** session id -> unclaimed corrections */
   const pending = new Map()
