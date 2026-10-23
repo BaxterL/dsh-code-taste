@@ -28,6 +28,7 @@ import {
 import { baseConfidence, classify, inferCategory, prefilter, toRuleText } from './lib/signals.js'
 import { renderPrompt, selectRules } from './lib/inject.js'
 import { canExtract, describeConfig, resolveConfig } from './lib/config.js'
+import { complete, completeWithHost } from './lib/llm.js'
 import { runExtraction } from './lib/extract.js'
 import { createTasteTool } from './lib/tool.js'
 
@@ -350,8 +351,30 @@ function start(ctx, rawConfig) {
 
   const lastExtract = new Map()
   const extracting = new Set()
+  let warnedHostRoute = false
 
-  /** Hybrid mode only: one small call per batch, throttled per session. */
+  /** Resolve the model route the user picked: none / host / custom. */
+  const resolveCallModel = () => {
+    if (config.model.source === 'custom') {
+      return prompt => complete(config, prompt)
+    }
+    const llm = ctx.get?.('llm')
+    const selection = ctx.get?.('agentDefaultModel')?.currentSelection?.()
+    if (!llm || !selection) {
+      if (!warnedHostRoute) {
+        warnedHostRoute = true
+        ctx.logger?.warn?.('taste: model.source is "host" but the harness model route is unavailable; extraction skipped')
+      }
+      return undefined
+    }
+    return prompt =>
+      completeWithHost(llm, selection, prompt, {
+        maxOutputTokens: config.model.maxOutputTokens,
+        temperature: config.model.temperature,
+      })
+  }
+
+  /** One small call per batch, throttled per session. */
   const maybeExtract = (sessionId, cwd) => {
     if (!canExtract(config)) return
     const queue = pending.get(sessionId) ?? []
@@ -359,10 +382,12 @@ function start(ctx, rawConfig) {
     if (extracting.has(sessionId)) return
     const last = lastExtract.get(sessionId) ?? 0
     if (Date.now() - last < config.extract.throttleMinutes * 60_000) return
+    const callModel = resolveCallModel()
+    if (callModel === undefined) return
     const batch = [...queue]
     extracting.add(sessionId)
     lastExtract.set(sessionId, Date.now())
-    runExtraction({ config, pending: batch, cwd, addRule })
+    runExtraction({ config, pending: batch, cwd, addRule, callModel })
       .then(stored => {
         const rest = (pending.get(sessionId) ?? []).filter(entry => !batch.includes(entry))
         pending.set(sessionId, rest)
