@@ -34,36 +34,27 @@ import { createTasteTool } from './lib/tool.js'
 import z from '@deepseek-ai/schemastery'
 
 /**
- * Declarative configuration. The host projects this schema into the configuration
- * form on the bundle's page in Plugins → Installed, so every knob below is
- * editable without touching the profile patch.
+ * Declarative configuration. The settings card on the plugin page writes these
+ * fields one at a time, so every key is top level.
  */
 export const Config = z.object({
-  model: z
-    .object({
-      source: z
-        .union(['none', 'host', 'custom'])
-        .default('none')
-        .description('none = no model calls · host = the harness\'s current model · custom = an OpenAI/Anthropic-compatible endpoint'),
-      format: z.union(['openai', 'anthropic']).default('openai').description('Wire format of a custom endpoint'),
-      baseURL: z.string().default('').description('Custom endpoint base URL, e.g. https://dashscope.aliyuncs.com/compatible-mode/v1 or http://127.0.0.1:11434/v1'),
-      model: z.string().default('').description('Model id at that endpoint, e.g. qwen-plus or qwen2.5-coder:7b'),
-      apiKey: z.string().default('').description('Literal key for a custom endpoint; prefer apiKeyEnv'),
-      apiKeyEnv: z.string().default('').description('Environment variable that holds the key, e.g. DASHSCOPE_API_KEY'),
-      maxOutputTokens: z.natural().default(256).description('Hard cap on one extraction reply'),
-      temperature: z.number().default(0).description('Sampling temperature, 0 keeps output stable'),
-      timeoutMs: z.natural().default(20000).description('Request timeout in milliseconds'),
-    })
-    .default({}),
+  source: z
+    .union(['none', 'host', 'custom'])
+    .default('none')
+    .description('none = no model calls · host = the harness\'s current model · custom = an OpenAI/Anthropic-compatible endpoint'),
+  format: z.union(['openai', 'anthropic']).default('openai').description('Wire format of a custom endpoint'),
+  baseURL: z.string().default('').description('Custom endpoint base URL, e.g. https://dashscope.aliyuncs.com/compatible-mode/v1 or http://127.0.0.1:11434/v1'),
+  modelId: z.string().default('').description('Model id at that endpoint, e.g. qwen-plus or qwen2.5-coder:7b'),
+  apiKey: z.string().default('').description('Literal key for a custom endpoint; prefer apiKeyEnv'),
+  apiKeyEnv: z.string().default('').description('Environment variable that holds the key, e.g. DASHSCOPE_API_KEY'),
+  maxOutputTokens: z.natural().default(256).description('Hard cap on one extraction reply'),
+  temperature: z.number().default(0).description('Sampling temperature, 0 keeps output stable'),
+  timeoutMs: z.natural().default(20000).description('Request timeout in milliseconds'),
   injectBudgetChars: z.natural().default(3000).description('Characters of rules injected into the prompt each turn'),
-  extract: z
-    .object({
-      minPending: z.natural().default(3).description('Waiting signals required before one extraction call'),
-      throttleMinutes: z.natural().default(10).description('Minutes between two extraction calls per session'),
-      maxInputChars: z.natural().default(4000).description('Characters of pending text sent to the model'),
-      maxRulesPerRun: z.natural().default(3).description('Rules accepted from one extraction call'),
-    })
-    .default({}),
+  minPending: z.natural().default(3).description('Waiting signals required before one extraction call'),
+  throttleMinutes: z.natural().default(10).description('Minutes between two extraction calls per session'),
+  maxInputChars: z.natural().default(4000).description('Characters of pending text sent to the model'),
+  maxRulesPerRun: z.natural().default(3).description('Rules accepted from one extraction call'),
 })
 
 export const name = 'taste'

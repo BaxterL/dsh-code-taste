@@ -1,15 +1,17 @@
 {
   "name": "dsh-code-taste",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Learns your coding taste from explicit instructions and corrections, stores it as confidence-scored rules in editable markdown, and injects them into every session.",
   "type": "module",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
     "index.js",
+    "client.js",
     "lib/*.js",
     "cordis.patch.yml",
     "locale/*.json",
@@ -22,8 +24,16 @@
     "@deepseek-ai/schemastery": "^3.18.5"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "keywords": [
