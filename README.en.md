@@ -1,6 +1,6 @@
 # dsh-code-taste
 
-English | [中文](README.md)
+English | [中文](https://github.com/BaxterL/dsh-code-taste/blob/main/README.md)
 
 ![dsh-code-taste banner](https://baxterl.github.io/assets/dsh-code-taste/banner.png?v=2)
 
@@ -16,26 +16,6 @@ hand, and puts the confirmed ones in front of the model at the start of every se
 
 Everything stays on your machine as plain files. No network calls, no telemetry.
 
-## Signals
-
-What it learns from, and what it cannot watch yet:
-
-| Signal | Looks like | Status |
-| --- | --- | --- |
-| Explicit instruction | 记住：以后都用 const | **live** — written at 0.85–0.90 |
-| Guardrail | 永远不要用 moment.js | **live** — 0.88 |
-| Correction | 不要用 any，改成 unknown | **live** — queued at 0.60 for review |
-| Positive feedback | 对，就这样 | **live** — +0.10 to the strongest injected rule |
-| **Accept** | you read the change and keep going | P1 — inferred from the absence of a follow-up edit |
-| **Reject** | you deny a tool call, or revert a change | P1 — tool-decision and workspace-diff hooks |
-| **Edit** | you rewrite what the agent just wrote | P1 — diff between the agent's write and the file afterwards |
-| **Choice** | you pick one of the options it offered | P1 — the answer to a question, or the approach you keep picking |
-
-The first four run today. The behavioural four are the honest ones — what you keep, what
-you throw away, what you rewrite — and they are the next release: they need to watch the
-workspace and the tool pipeline instead of only the conversation, so they are built and
-verified separately. See [docs/ROADMAP.md](docs/ROADMAP.md).
-
 ## Install
 
 ### Requirements
@@ -44,6 +24,14 @@ verified separately. See [docs/ROADMAP.md](docs/ROADMAP.md).
 - Node.js `22.19+` or `24+` (the version DSH itself runs on)
 
 No other dependencies — the bundle has none and needs no build step.
+
+### From npm
+
+```sh
+dsh plugin --profile desktop add dsh-code-taste
+```
+
+Pin a version: `dsh plugin --profile desktop add dsh-code-taste@0.10.0`.
 
 ### From GitHub
 
