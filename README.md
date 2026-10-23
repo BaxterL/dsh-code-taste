@@ -1,5 +1,7 @@
 # dsh-code-taste
 
+![dsh-code-taste banner](https://baxterl.github.io/assets/dsh-code-taste/banner.png)
+
 Teaches DeepSeek Harness **your** taste — coding style, aesthetic preferences and the
 habits you keep correcting — the way
 [Command Code's taste](https://commandcode.ai/docs/taste) works, and applies it to
