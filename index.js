@@ -138,8 +138,7 @@ function start(ctx, rawConfig) {
    * The card is a browser request, so the file it writes is settings.json, never
    * the profile patch.
    */
-  const registerSettingsRoute = () => {
-    const webServer = ctx.get?.('webServer')
+  const registerSettingsRoute = webServer => {
     if (!webServer || typeof webServer.register !== 'function') {
       ctx.logger?.warn?.('taste: webServer service is unavailable; the settings card cannot save')
       return
@@ -199,10 +198,21 @@ function start(ctx, rawConfig) {
       'taste: settings route',
     )
   }
-  try {
-    registerSettingsRoute()
-  } catch (error) {
-    reportBootError(ctx, error, 'settings-route')
+  // `webServer` may mount after this plugin: wait for it instead of reading it once.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], scoped => {
+      try {
+        registerSettingsRoute(scoped.webServer)
+      } catch (error) {
+        reportBootError(ctx, error, 'settings-route')
+      }
+    })
+  } else {
+    try {
+      registerSettingsRoute(ctx.get?.('webServer'))
+    } catch (error) {
+      reportBootError(ctx, error, 'settings-route')
+    }
   }
 
   const sessionIdOf = createSessionIdentity()

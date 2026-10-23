@@ -16,6 +16,19 @@ window.__ModuleLoader__.load({
 
     const ENDPOINT = '/dsh-code-taste/config'
 
+    /** Fetch JSON, but never let an empty or non-JSON body surface as a raw parse error. */
+    async function request(init) {
+      const response = await fetch(ENDPOINT, init)
+      const text = await response.text()
+      if (!response.ok) throw new Error(`HTTP ${response.status}${text ? ` · ${text.slice(0, 120)}` : ''}`)
+      if (!text) throw new Error('empty response')
+      try {
+        return JSON.parse(text)
+      } catch {
+        throw new Error(`unexpected response: ${text.slice(0, 120)}`)
+      }
+    }
+
     const SOURCES = [
       ['none', '不使用模型（只做确定性采集）'],
       ['host', '跟随当前会话模型（自带 DeepSeek）'],
@@ -70,13 +83,15 @@ window.__ModuleLoader__.load({
     function SettingsCard(props) {
       const [value, setValue] = React.useState(null)
       const [error, setError] = React.useState('')
+      const [attempt, setAttempt] = React.useState(0)
 
       React.useEffect(() => {
         let alive = true
-        fetch(ENDPOINT, { cache: 'no-store' })
-          .then(response => response.json())
+        request({ cache: 'no-store' })
           .then(body => {
-            if (alive) setValue(body)
+            if (!alive) return
+            setError('')
+            setValue(body)
           })
           .catch(cause => {
             if (alive) setError(String(cause && cause.message ? cause.message : cause))
@@ -84,16 +99,15 @@ window.__ModuleLoader__.load({
         return () => {
           alive = false
         }
-      }, [])
+      }, [attempt])
 
       const save = (field, next) => {
         setValue(current => (current ? { ...current, [field]: next } : current))
-        fetch(ENDPOINT, {
+        request({
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ field, value: next }),
         })
-          .then(response => response.json())
           .then(body => {
             if (body && body.error) setError(String(body.error))
             else {
@@ -115,7 +129,20 @@ window.__ModuleLoader__.load({
       }
 
       if (!value) {
-        return React.createElement('div', { style: { fontSize: 12.5, opacity: 0.6, padding: '8px 0' } }, error || '加载中…')
+        return React.createElement(
+          'div',
+          { style: { fontSize: 12.5, opacity: 0.75, padding: '8px 0', display: 'grid', gap: 8, justifyItems: 'start' } },
+          React.createElement('div', null, error ? `设置服务未就绪：${error}` : '加载中…'),
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              onClick: () => setAttempt(count => count + 1),
+              style: { font: 'inherit', fontSize: 12, padding: '4px 10px', borderRadius: 6, cursor: 'pointer', border: '1px solid rgba(128,128,128,0.35)', background: 'transparent', color: 'inherit' },
+            },
+            '重试',
+          ),
+        )
       }
 
       const source = value.source || 'none'
