@@ -6,7 +6,7 @@
  * @module dsh-code-taste
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { dshHome, tasteDir, writeAtomic } from './lib/paths.js'
 import {
@@ -214,6 +214,39 @@ function start(ctx, rawConfig) {
     } catch (error) {
       reportBootError(ctx, error, 'settings-route')
     }
+  }
+
+  /**
+   * Standing guidance: with a model route the agent records durable preferences
+   * itself instead of waiting for `taste learn`. In `none` mode there is nothing
+   * to be smart about, so the section renders empty and costs nothing.
+   */
+  const GUIDANCE = [
+    '## Taste memory',
+    'Keep this user\'s coding taste current without being asked:',
+    '- When the user states a lasting preference ("use X", "never Y", "from now on") or corrects your approach, call the `taste` tool with action `add` and one short imperative rule. Do not announce it or ask for confirmation.',
+    '- One rule per call. Skip anything that only applies to the current task, and never invent a preference the user did not express.',
+    '- If the user repeats or affirms the same point, call `add` again so the existing rule is reinforced instead of duplicated.',
+    '- Call `taste list` before writing code in an area you have not touched in this session.',
+  ].join('\n')
+
+  const registerGuidance = () => {
+    if (!ctx.systemPrompt || typeof ctx.systemPrompt.section !== 'function') return
+    ctx.effect(
+      () =>
+        ctx.systemPrompt.section({
+          name: 'taste-guidance',
+          order: 910,
+          text: () => (canExtract(config) ? GUIDANCE : ''),
+        }),
+      'taste: guidance section',
+    )
+  }
+
+  try {
+    registerGuidance()
+  } catch (error) {
+    reportBootError(ctx, error, 'guidance-section')
   }
 
   const sessionIdOf = createSessionIdentity()
@@ -444,8 +477,15 @@ function start(ctx, rawConfig) {
   }
 
   const exportTaste = async (cwd, format) => {
+    const exportDir = join(tasteDir(cwd, 'project'), 'export')
     const rules = mergeFor(cwd).filter(rule => rule.status === 'active')
-    if (rules.length === 0) return undefined
+    if (rules.length === 0) {
+      // No rules: remove stale exports rather than leave an old file claiming otherwise.
+      for (const name of ['AGENTS.taste.md', 'CLAUDE.taste.md']) {
+        rmSync(join(exportDir, name), { force: true })
+      }
+      return undefined
+    }
     const body = [
       '# Coding conventions',
       '',
@@ -485,7 +525,7 @@ function start(ctx, rawConfig) {
       })
   }
 
-  /** One small call per batch, throttled per session. */
+  /** One small call per batch, throttled per session. Ordinary chat never queues anything. */
   const maybeExtract = (sessionId, cwd) => {
     if (!canExtract(config)) return
     const queue = pending.get(sessionId) ?? []
