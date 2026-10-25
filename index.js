@@ -26,7 +26,7 @@ import {
   similarity,
 } from './lib/store.js'
 import { baseConfidence, classify, inferCategory, prefilter, toRuleText } from './lib/signals.js'
-import { renderPrompt, selectRules } from './lib/inject.js'
+import { isCandidate, renderPrompt, selectRules } from './lib/inject.js'
 import { canExtract, describeConfig, resolveConfig } from './lib/config.js'
 import { coerceField, readSettings, toPublicConfig, writeSettings } from './lib/settings.js'
 import { describeUsage, recordUsage, summarize } from './lib/usage.js'
@@ -305,7 +305,9 @@ function start(ctx, rawConfig) {
 
   const renderFor = sessionId => {
     const rules = snapshots.get(sessionId) ?? []
-    const pendingCount = rules.filter(rule => rule.status === 'pending').length
+    // Count decayed-out active rules too: otherwise they vanish from the prompt
+    // with no hint that `taste review` can bring them back.
+    const pendingCount = rules.filter(isCandidate).length
     markUsed(sessionId, rules)
     return renderPrompt(rules, { pendingCount, budget: config.injectBudgetChars })
   }
@@ -478,7 +480,9 @@ function start(ctx, rawConfig) {
 
   const exportTaste = async (cwd, format) => {
     const exportDir = join(tasteDir(cwd, 'project'), 'export')
-    const rules = mergeFor(cwd).filter(rule => rule.status === 'active')
+    // Export what is actually in force, not every `active` row: a decayed rule is
+    // not injected, so writing it into AGENTS.taste.md would overstate the file.
+    const rules = selectRules(mergeFor(cwd))
     if (rules.length === 0) {
       // No rules: remove stale exports rather than leave an old file claiming otherwise.
       for (const name of ['AGENTS.taste.md', 'CLAUDE.taste.md']) {
