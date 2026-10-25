@@ -18,6 +18,7 @@ const { classify, prefilter } = await import('../lib/signals.js')
 const { resolveConfig, canExtract } = await import('../lib/config.js')
 const { buildRequest, parseResponse } = await import('../lib/llm.js')
 const { parseRules } = await import('../lib/extract.js')
+const { renderPrompt } = await import('../lib/inject.js')
 
 const handlers = new Map()
 const contexts = []
@@ -228,6 +229,21 @@ const conflictReview = await tool.execute({ action: 'review' }, exec)
 check('the contradicted rule waits in review', conflictReview.text.includes(posRule))
 const conflictWhy = await tool.execute({ action: 'why', id: contentId(posRule) }, exec)
 check('the conflict is recorded as evidence', conflictWhy.text.includes('superseded by'))
+
+console.log('\n# budget omissions are disclosed')
+const many = Array.from({ length: 6 }, (_, index) => ({
+  id: `r_budget${index}`,
+  text: `规则编号 ${index}：` + '这是一条用来撑爆预算的比较长的规则文本'.repeat(3),
+  category: 'code-style',
+  status: 'active',
+  confidence: 0.9,
+  evidenceCount: 1,
+}))
+const roomy = renderPrompt(many, { budget: 12000 })
+const tight = renderPrompt(many, { budget: 400 })
+check('a roomy budget renders every rule', many.every(rule => roomy.includes(rule.text)))
+check('a tight budget drops rules', !tight.includes(many[5].text))
+check('a tight budget discloses the omissions', /more rule\(s\) did not fit the budget/.test(tight))
 
 console.log('\n# config')
 const defaults = resolveConfig(undefined).config

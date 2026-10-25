@@ -40,14 +40,18 @@
 ## P2 — scope and explanation
 
 - [ ] `glob` matching against paths touched this turn
-- [ ] relevance ranking (keyword first, embeddings later)
+- [ ] relevance ranking by repo language and recently touched paths (keyword first, embeddings later)
+- [ ] re-inject the same section after context compaction (compaction drops prompt-context blocks)
 - [ ] `/taste` command: `list | rm | edit | pause | why | profile | export | review`
 - [x] `export` to an AGENTS.md or CLAUDE.md fragment under `taste/export/`
 - [ ] conflict warning when project overrides global
+- [ ] supersede chain (`[superseded-by:…]`) so a contradicted rule keeps its history instead of just going pending
+- [ ] `taste add --dry-run` plus stage-0 filtering of one-off instructions and machine paths
 
 ## P3 — surfaces
 
 - [ ] settings panel: grouped by category, confidence bars, pending review, `why` modal
 - [ ] history backfill over past sessions
-- [ ] periodic consolidation (10 loose rules → 3 principles)
+- [ ] periodic consolidation (10 loose rules → 3 principles), deterministic first, dry-run preview
+- [ ] taste-bench: fixed correction corpus → expected rules, scoring extraction, false merges, conflict recall and injection adherence
 - [ ] profile summary (one paragraph describing the user's taste)
