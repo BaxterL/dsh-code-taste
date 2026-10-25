@@ -25,8 +25,8 @@ import {
   saveState,
   similarity,
 } from './lib/store.js'
-import { baseConfidence, classify, inferCategory, prefilter, toRuleText } from './lib/signals.js'
-import { isCandidate, renderPrompt, selectRules } from './lib/inject.js'
+import { baseConfidence, classify, inferCategory, negationOf, prefilter, toRuleText } from './lib/signals.js'
+import { ACTIVE_THRESHOLD, isCandidate, renderPrompt, selectRules } from './lib/inject.js'
 import { canExtract, describeConfig, resolveConfig } from './lib/config.js'
 import { coerceField, readSettings, toPublicConfig, writeSettings } from './lib/settings.js'
 import { describeUsage, recordUsage, summarize } from './lib/usage.js'
@@ -68,6 +68,7 @@ const REINFORCE_STEP = 0.1
 const APPROVE_STEP = 0.05
 const CONFIDENCE_CEILING = 0.95
 const SIMILARITY_MERGE = 0.8
+const CONFLICT_PENALTY = 0.25
 
 /** @returns {string} plain text of a user message's content blocks. */
 function messageText(message) {
@@ -389,6 +390,28 @@ function start(ctx, rawConfig) {
         }
       }
       if (best < SIMILARITY_MERGE) existing = undefined
+    }
+    if (existing && negationOf(existing.text) !== negationOf(input.text)) {
+      // Opposite polarity is a conflict, never a duplicate: "Do not use const"
+      // reaches 1.0 similarity with "Use const", and merging would reinforce the
+      // rule the user just reversed. Demote the contradicted rules instead.
+      const conflicting = rules.filter(
+        rule => similarity(rule.text, input.text) >= SIMILARITY_MERGE && negationOf(rule.text) !== negationOf(input.text),
+      )
+      for (const old of conflicting) {
+        // Drop below the injection threshold: a contradicted rule must stop
+        // steering the agent immediately, but stays reviewable in `review`.
+        old.confidence = Math.max(0.1, Math.min(ACTIVE_THRESHOLD - 0.01, old.confidence - CONFLICT_PENALTY))
+        old.status = 'pending'
+        old.ineffective = (old.ineffective ?? 0) + 1
+        await appendEvidence(dir, {
+          id: old.id,
+          at: new Date().toISOString(),
+          kind: 'conflict',
+          quote: `superseded by: ${input.text}`.slice(0, 200),
+        })
+      }
+      existing = undefined
     }
     const now = new Date().toISOString()
     const base = typeof input.confidence === 'number' ? input.confidence : baseConfidence(input.kind)

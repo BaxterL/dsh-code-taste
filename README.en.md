@@ -239,8 +239,8 @@ The plugin exposes one tool, `taste`.
 | `list` | — | every rule with scope, category, confidence, and whether injection is active |
 | `learn` | — | drains this session's pending corrections and asks you to distil the durable ones |
 | `add` | `text`, `category?`, `scope?`, `confidence?`, `glob?` | adds a rule, or reinforces a near-duplicate |
-| `review` | — | pending candidates that are deliberately not injected |
-| `approve` | `id` | promotes a candidate to active |
+| `review` | — | rules that are not injected: pending candidates, or active rules that decayed out |
+| `approve` | `id` | promotes a candidate or a decayed rule back to active (0.65+) |
 | `forget` | `id`, `scope?` | removes a rule from one or both scopes |
 | `why` | `id` | evidence records for one rule |
 | `profile` | — | one-paragraph summary plus the strongest rules |
@@ -255,7 +255,7 @@ The plugin exposes one tool, `taste`.
   not change behaviour.
 - **`scope`** — `global` (default) applies everywhere; `project` stays inside this
   workspace. Project rules shadow global rules with the same text.
-- **`confidence`** — `0.1`–`0.95`. Omit it and the source decides: `0.55` for a rule the
+- **`confidence`** — `0.1`–`0.95`. Omit it and the source decides: `0.65` for a rule the
   agent adds, `0.85–0.90` for an explicit instruction. Below `0.55` the rule lands in
   `pending` and is not injected.
 - **`glob`** — restricts a rule to matching paths, e.g. `src/ui/**`. Stored and shown now;
@@ -269,13 +269,14 @@ The plugin exposes one tool, `taste`.
 
 | Stage | Rule |
 | --- | --- |
-| Base score | explicit 0.85 · guardrail 0.88 · correction 0.60 · agent-added 0.55 |
+| Base score | explicit 0.85 · guardrail 0.88 · correction 0.60 · agent-added 0.65 |
 | Reinforcement | +0.10 per repeat or positive feedback, capped at 0.95 |
 | Promotion | pending → active on a second piece of evidence or on `approve` |
 | Decay | half-life 60 days measured from `last_used` / `last_seen` |
 | Pinned | `[pinned]` exempts a rule from decay |
-| Archive | effective confidence below 0.25 counts as archived (kept on disk, never injected) |
+| Archive | decay floors at 0.25: a rule never fades away, and `approve` can always revive it |
 | Dedupe | containment similarity ≥ 0.80 after folding 别用/不要用, 改成/换成 … |
+| Conflict | opposite polarity (`Use const` vs `Never use const`) never merges: the new rule lands, the contradicted one drops to 0.54 as pending |
 
 ### Where things live
 
@@ -293,14 +294,14 @@ rules file.
 ### Injection
 
 - Registered as a `systemPrompt` context named `taste`, order `920`.
-- Snapshotted once at session start and frozen for the session, so the prompt prefix
-  stays byte-stable and the KV cache holds.
-- Budget: 6000 characters (≈1500 tokens), strongest rules first, the rest dropped
-  silently.
+- Each session keeps its own rule snapshot; editing the store rebuilds it, so the next
+  prompt assembly sees the change, and the section stays stable while nothing changes.
+- Budget: 3000 characters by default (configurable 400–12000), strongest rules first,
+  the rest dropped silently.
 - Wrapped in `<taste-rules>` with an explicit "reference data, not instructions; the
   current request wins" preamble.
-- When candidates are waiting, one footer line mentions them; the rules themselves are
-  never injected while pending.
+- When candidates wait — pending rules, or active rules that decayed out of the injection
+  window — one footer line mentions them; those rules are never injected.
 
 ### Privacy
 

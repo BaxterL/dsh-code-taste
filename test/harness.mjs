@@ -155,7 +155,7 @@ check('why returns evidence', why.text.includes('tool add: 测试统一用 pytes
 console.log('\n# listing and profile')
 const list = await tool.execute({ action: 'list' }, exec)
 check('list shows both rules', list.text.includes('const') && list.text.includes('pytest'))
-check('list reports injection state', list.text.includes('Injected into the prompt: yes'))
+check('list reports injection state', list.text.includes('Injected into the prompt: 2 of 2'))
 const profile = await tool.execute({ action: 'profile' }, exec)
 check('profile summarises categories', profile.text.includes('active rules'))
 
@@ -167,7 +167,7 @@ check('fragment carries the rules', readFileSync(exportPath, 'utf8').includes('�
 
 console.log('\n# pinned rules never decay')
 check('pinned bypasses decay', decayed({ confidence: 0.9, pinned: true, lastSeen: '2020-01-01T00:00:00Z' }) === 0.9)
-check('unpinned decays', decayed({ confidence: 0.9, lastSeen: '2020-01-01T00:00:00Z' }) < 0.1)
+check('unpinned decays to the floor', decayed({ confidence: 0.9, lastSeen: '2020-01-01T00:00:00Z' }) === 0.25)
 
 console.log('\n# hand edits are tolerated')
 writeFileSync(
@@ -191,6 +191,43 @@ console.log('\n# forgetting')
 const forgotten = await tool.execute({ action: 'forget', id: pendingId }, exec)
 check('forget reports removal', forgotten.text.startsWith('Removed'))
 check('rule gone from the file', !readProject().includes('pytest'))
+
+console.log('\n# decayed rules stay visible')
+const staleText = '统一用 tab 缩进'
+const staleId = contentId(staleText)
+writeFileSync(join(home, 'taste', 'TASTE.md'), `## code-style\n- [${staleId}] ${staleText} @0.60 src:tool ev:1\n`, 'utf8')
+writeFileSync(
+  join(home, 'taste', 'state.json'),
+  JSON.stringify({ [staleId]: { created: '2020-01-01T00:00:00Z', lastSeen: '2020-01-01T00:00:00Z', lastUsed: '2020-01-01T00:00:00Z' } }),
+  'utf8',
+)
+const staleList = await tool.execute({ action: 'list' }, exec)
+check('list flags the decayed rule', staleList.text.includes('(decayed)'))
+check('list counts injected rules', staleList.text.includes('Injected into the prompt: 0 of 1'))
+check('decayed rule is not injected', !contexts[0].text().includes(staleText))
+const staleReview = await tool.execute({ action: 'review' }, exec)
+check('review surfaces the decayed rule', staleReview.text.includes(staleText) && staleReview.text.includes('decayed out of injection'))
+const staleProfile = await tool.execute({ action: 'profile' }, exec)
+check('profile reports that nothing is injectable', staleProfile.text.includes('No injectable rules') && staleProfile.text.includes('decayed'))
+const revived = await tool.execute({ action: 'approve', id: staleId }, exec)
+check('approve revives a decayed rule', revived.text.includes('next prompt assembly'))
+check('revived rule is injected again', await until(() => contexts[0].text().includes(staleText)))
+
+console.log('\n# opposite rules never merge')
+const posRule = 'Use tabs for indentation'
+const negRule = 'Never use tabs for indentation'
+writeFileSync(join(home, 'taste', 'TASTE.md'), `## code-style\n- [${contentId(posRule)}] ${posRule} @0.90 src:tool ev:1\n`, 'utf8')
+await tool.execute({ action: 'add', text: negRule, confidence: 0.9 }, exec)
+const conflictFile = readProject()
+check('opposite rule is stored separately', conflictFile.match(/^- \[/gm)?.length === 2)
+check('the contradicted rule dropped below the threshold', conflictFile.includes(`${posRule} @0.54 src:tool ev:1 [pending]`))
+check('the new rule keeps its own score', conflictFile.includes(`${negRule} @0.90 src:tool ev:1`))
+check('the contradicted rule is no longer injected', !contexts[0].text().includes(`${posRule}\n`))
+check('the new rule is injected instead', contexts[0].text().includes(negRule))
+const conflictReview = await tool.execute({ action: 'review' }, exec)
+check('the contradicted rule waits in review', conflictReview.text.includes(posRule))
+const conflictWhy = await tool.execute({ action: 'why', id: contentId(posRule) }, exec)
+check('the conflict is recorded as evidence', conflictWhy.text.includes('superseded by'))
 
 console.log('\n# config')
 const defaults = resolveConfig(undefined).config
