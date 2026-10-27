@@ -64,6 +64,8 @@ export const inject = ['tools', 'systemPrompt', 'workingDirectory']
 
 const MAX_PENDING = 20
 const AUTO_CONFIDENCE = 0.5
+/** Pasted documents are not corrections; longer messages are left alone. */
+const MAX_CORRECTION_CHARS = 400
 const REINFORCE_STEP = 0.1
 const APPROVE_STEP = 0.05
 const CONFIDENCE_CEILING = 0.95
@@ -238,7 +240,10 @@ function start(ctx, rawConfig) {
         ctx.systemPrompt.section({
           name: 'taste-guidance',
           order: 910,
-          text: () => (canExtract(config) ? GUIDANCE : ''),
+          // Always on. `taste add` is a deterministic write and needs no model, so
+          // gating this section on canExtract() silenced the instruction exactly
+          // when the regex path was the only thing running.
+          text: () => GUIDANCE,
         }),
       'taste: guidance section',
     )
@@ -620,6 +625,9 @@ function start(ctx, rawConfig) {
     if (!filtered.ok) return
     const signal = classify(filtered.text)
     if (signal === null) return
+    // A pasted document that happens to contain "不要" is not a correction. This
+    // is how a PR template once became a rule starting "ok我加了，别人的文案…".
+    if (signal.kind === 'correction' && filtered.text.length > MAX_CORRECTION_CHARS) return
     const sessionId = sessionIdOf(session)
     const cwd = cwdOf(session)
 
@@ -639,12 +647,17 @@ function start(ctx, rawConfig) {
     while (queue.length > MAX_PENDING) queue.shift()
     pending.set(sessionId, queue)
 
-    if (signal.kind === 'explicit' || signal.kind === 'guardrail') {
+    if (signal.kind === 'explicit' || signal.kind === 'guardrail' || !canExtract(config)) {
+      // Explicit and guardrail statements are safe to write immediately. With no
+      // model route there is nothing to distil a correction with either, so the
+      // regex result is kept as a pending candidate instead of a queued message
+      // that nothing will ever drain.
+      const immediate = signal.kind === 'explicit' || signal.kind === 'guardrail'
       addRule(cwd, {
         text: toRuleText(filtered.text),
         kind: signal.kind,
         patterns: signal.patterns,
-        confidence: signal.weight,
+        confidence: immediate ? signal.weight : AUTO_CONFIDENCE,
         source: signal.kind,
         quote: filtered.text,
       })

@@ -247,7 +247,7 @@ check('a tight budget discloses the omissions', /more rule\(s\) did not fit the 
 
 console.log('\n# config')
 const defaults = resolveConfig(undefined).config
-check('default source is none (no model calls)', defaults.model.source === 'none')
+check('default source is host (session model)', defaults.model.source === 'host')
 check('default injection budget is 3000 chars', defaults.injectBudgetChars === 3000)
 check('bad mode falls back with a warning', resolveConfig({ mode: 'magic' }).config.model.source === 'none')
 check('hybrid without a route cannot extract', canExtract(resolveConfig({ mode: 'hybrid' }).config) === false)
@@ -284,6 +284,43 @@ check('fenced JSON is parsed', parsedRules.length === 1 && parsedRules[0].text =
 check('too-short rules are dropped', parseRules('{"rules":[{"text":"x"}]}', 3).length === 0)
 check('rule count is capped', parseRules('{"rules":[{"text":"aaaa"},{"text":"bbbb"},{"text":"cccc"}]}', 2).length === 2)
 check('garbage returns nothing', parseRules('no json here', 3).length === 0)
+
+console.log('\n# none mode stays useful')
+const home2 = mkdtempSync(join(tmpdir(), 'taste-home2-'))
+const work2 = mkdtempSync(join(tmpdir(), 'taste-work2-'))
+process.env.DSH_HOME = home2
+const handlers2 = new Map()
+const sections2 = []
+const ctx2 = {
+  logger: { info: () => {}, warn: () => {} },
+  effect: run => run(),
+  on(name, listener) {
+    if (!handlers2.has(name)) handlers2.set(name, [])
+    handlers2.get(name).push(listener)
+  },
+  tools: { register: () => {} },
+  systemPrompt: {
+    section(entry) {
+      sections2.push(entry)
+    },
+    context: () => {},
+  },
+  workingDirectory: { get: () => work2 },
+}
+apply(ctx2, { source: 'none' })
+const session2 = { id: 'sess-none' }
+const emit2 = (name, payload) => {
+  for (const listener of handlers2.get(name) ?? []) listener.call(ctx2, payload)
+}
+emit2('agent/created', { agent: { session: session2 } })
+check('guidance is injected without a model route', sections2.some(entry => typeof entry.text === 'function' && entry.text().includes('Taste memory')))
+emit2('agent/inbox/claimed', { agent: { session: session2 }, message: { content: [{ type: 'text', text: '不要用 any，改成 unknown' }] } })
+await sleep(300)
+const globalFile2 = join(home2, 'taste', 'TASTE.md')
+const noneText = existsSync(globalFile2) ? readFileSync(globalFile2, 'utf8') : ''
+check('correction becomes a pending rule instead of a dead queue entry', noneText.includes('[pending]'))
+check('the correction text is kept', noneText.includes('不要用 any'))
+check('regex mode writes no active rule', !/不要用 any @0\.(5[5-9]|[6-9])/.test(noneText))
 
 rmSync(home, { recursive: true, force: true })
 rmSync(work, { recursive: true, force: true })

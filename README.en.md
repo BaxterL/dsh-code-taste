@@ -181,7 +181,7 @@ override the row in your profile's `cordis.patch.yml`:
 
 | `model.source` | Uses | Needs |
 | --- | --- | --- |
-| `none` | no model; explicit instructions still land immediately, corrections wait for `taste learn` | nothing |
+| `none` | no model; explicit instructions and guardrails still land immediately, corrections land as 0.5 pending | nothing |
 | `host` (default) | the harness's current model (the built-in DeepSeek, or whatever you selected) | no endpoint, no key |
 | `custom` | an OpenAI/Anthropic-compatible endpoint — third party or local | `format`, `baseURL`, `model`; local usually needs no key |
 
@@ -313,8 +313,7 @@ rules file.
 
 ### Known limits (v0.2.0)
 
-- Extraction defaults to the session model (`host`); set `model.source: none` to keep it deterministic only, where the model does not distil
-  corrections. With the default `none`, corrections wait for `taste learn`.
+- Extraction defaults to the session model (`host`). `model.source: none` keeps the plugin on the local regex path: explicit statements land immediately, corrections land as 0.5 pending for `taste review`.
 - No diff learning yet: code you rewrite by hand is not observed (planned, P1).
 - Per-agent prompt scoping depends on the event context; when it is not agent-scoped the
   plugin falls back to one global section and logs that once.
