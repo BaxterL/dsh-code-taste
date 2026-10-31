@@ -7,17 +7,19 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { EventEmitter } from 'node:events'
+import { spawn } from 'node:child_process'
 
 const home = mkdtempSync(join(tmpdir(), 'taste-home-'))
 const work = mkdtempSync(join(tmpdir(), 'taste-work-'))
 process.env.DSH_HOME = home
 
-const { apply } = await import('../index.js')
-const { similarity, decayed, contentId } = await import('../lib/store.js')
-const { classify, prefilter } = await import('../lib/signals.js')
+const { apply, initialState } = await import('../index.js')
+const { similarity, decayed, contentId, parseMarkdown, renderMarkdown } = await import('../lib/store.js')
+const { classify, prefilter, captureText } = await import('../lib/signals.js')
 const { resolveConfig, canExtract } = await import('../lib/config.js')
 const { buildRequest, parseResponse } = await import('../lib/llm.js')
-const { parseRules } = await import('../lib/extract.js')
+const { parseRules, runExtraction } = await import('../lib/extract.js')
 const { renderPrompt } = await import('../lib/inject.js')
 
 const handlers = new Map()
@@ -54,7 +56,9 @@ const emit = (name, payload, scope = ctx) => {
 }
 
 let failures = 0
+let checks = 0
 const check = (label, condition) => {
+  checks += 1
   if (condition) {
     console.log(`  ok   ${label}`)
   } else {
@@ -73,7 +77,7 @@ const until = async (predicate, timeoutMs = 3000) => {
   return false
 }
 
-const projectFile = join(home, 'taste', 'TASTE.md')
+const projectFile = join(work, '.dsh', 'taste', 'TASTE.md')
 const readProject = () => readFileSync(projectFile, 'utf8')
 const ruleIdOf = text => text.match(/^- \[(r_[a-z0-9]+)\]/m)?.[1]
 
@@ -112,15 +116,16 @@ say('记住：以后都用 const，别用 let')
 check('store file written', await until(() => existsSync(projectFile)))
 const first = readProject()
 check('rule body strips the meta prefix', first.includes('以后都用 const'))
-check('explicit starts active at 90%', first.includes('@0.90'))
+check('explicit starts pending at 50%', first.includes('@0.50') && first.includes('[pending]'))
 check('id is content-addressed', ruleIdOf(first) === contentId('以后都用 const，别用 let'))
 check('prompt frames rules as data, not instructions', contexts[0].text().includes('<taste-rules>') && contexts[0].text().includes('reference data'))
-check('prompt now contains the rule', contexts[0].text().includes('以后都用 const'))
+check('prompt withholds automatic rule', !contexts[0].text().includes('- 以后都用 const'))
 
-console.log('\n# repeating reinforces instead of duplicating')
+console.log('\n# replay is idempotent')
 say('记住：以后都用 const，别用 let')
-check('confidence raised to 95%', await until(() => readProject().includes('@0.95')))
-check('evidence count is 2', readProject().includes('ev:2'))
+await sleep(100)
+check('replay does not raise confidence', readProject().includes('@0.50'))
+check('replay does not raise evidence count', readProject().includes('ev:1'))
 check('only one rule line', readProject().match(/^- \[/gm)?.length === 1)
 
 console.log('\n# near-duplicates merge')
@@ -129,19 +134,19 @@ const beforeMerge = readProject().match(/^- \[/gm)?.length
 await tool.execute({ action: 'add', text: '以后都用 const 不要用 let', confidence: 0.8 }, exec)
 const afterMerge = readProject().match(/^- \[/gm)?.length
 check('a near-duplicate does not create a second rule', afterMerge === beforeMerge)
-check('near-duplicate reinforced the original', readProject().includes('ev:3'))
+check('explicit add reinforced the original', readProject().includes('ev:2'))
 
 console.log('\n# corrections wait for distillation')
 say('不要用 any，改成 unknown')
 const learned = await tool.execute({ action: 'learn' }, exec)
 check('learn surfaces the correction', learned.text.includes('不要用 any'))
-check('learn drains the queue', !(await tool.execute({ action: 'learn' }, exec)).text.includes('不要用 any'))
+check('learn preserves the queue', (await tool.execute({ action: 'learn' }, exec)).text.includes('不要用 any'))
 
 console.log('\n# low-confidence rules stay pending, then promote')
 const pendingAdd = await tool.execute({ action: 'add', text: '测试统一用 pytest', confidence: 0.4 }, exec)
 check('pending rule added', pendingAdd.text.startsWith('Added'))
 check('pending marker written', readProject().includes('[pending]'))
-check('pending rule not injected', !contexts[0].text().includes('pytest'))
+check('pending rule not injected', !contexts[0].text().includes('- 测试统一用 pytest'))
 const review = await tool.execute({ action: 'review' }, exec)
 check('review lists the candidate', review.text.includes('pytest'))
 const pendingId = ruleIdOf(readProject().split('\n').filter(line => line.includes('pytest')).join('\n'))
@@ -192,20 +197,21 @@ console.log('\n# forgetting')
 const forgotten = await tool.execute({ action: 'forget', id: pendingId }, exec)
 check('forget reports removal', forgotten.text.startsWith('Removed'))
 check('rule gone from the file', !readProject().includes('pytest'))
+check('rewrites preserve hand-written comments and prose', readProject().includes('my notes: this file is mine') && readProject().includes('随便写的说明'))
 
 console.log('\n# decayed rules stay visible')
 const staleText = '统一用 tab 缩进'
 const staleId = contentId(staleText)
-writeFileSync(join(home, 'taste', 'TASTE.md'), `## code-style\n- [${staleId}] ${staleText} @0.60 src:tool ev:1\n`, 'utf8')
+writeFileSync(projectFile, `## code-style\n- [${staleId}] ${staleText} @0.60 src:tool ev:1\n`, 'utf8')
 writeFileSync(
-  join(home, 'taste', 'state.json'),
+  join(work, '.dsh', 'taste', 'state.json'),
   JSON.stringify({ [staleId]: { created: '2020-01-01T00:00:00Z', lastSeen: '2020-01-01T00:00:00Z', lastUsed: '2020-01-01T00:00:00Z' } }),
   'utf8',
 )
 const staleList = await tool.execute({ action: 'list' }, exec)
 check('list flags the decayed rule', staleList.text.includes('(decayed)'))
 check('list counts injected rules', staleList.text.includes('Injected into the prompt: 0 of 1'))
-check('decayed rule is not injected', !contexts[0].text().includes(staleText))
+check('decayed rule is not injected', !contexts[0].text().includes(`- ${staleText}`))
 const staleReview = await tool.execute({ action: 'review' }, exec)
 check('review surfaces the decayed rule', staleReview.text.includes(staleText) && staleReview.text.includes('decayed out of injection'))
 const staleProfile = await tool.execute({ action: 'profile' }, exec)
@@ -217,11 +223,11 @@ check('revived rule is injected again', await until(() => contexts[0].text().inc
 console.log('\n# opposite rules never merge')
 const posRule = 'Use tabs for indentation'
 const negRule = 'Never use tabs for indentation'
-writeFileSync(join(home, 'taste', 'TASTE.md'), `## code-style\n- [${contentId(posRule)}] ${posRule} @0.90 src:tool ev:1\n`, 'utf8')
+writeFileSync(projectFile, `## code-style\n- [${contentId(posRule)}] ${posRule} @0.90 src:tool ev:1\n`, 'utf8')
 await tool.execute({ action: 'add', text: negRule, confidence: 0.9 }, exec)
 const conflictFile = readProject()
 check('opposite rule is stored separately', conflictFile.match(/^- \[/gm)?.length === 2)
-check('the contradicted rule dropped below the threshold', conflictFile.includes(`${posRule} @0.54 src:tool ev:1 [pending]`))
+check('conflict goes to review without destroying confidence', conflictFile.includes(`${posRule} @0.90 src:tool ev:1 [pending]`))
 check('the new rule keeps its own score', conflictFile.includes(`${negRule} @0.90 src:tool ev:1`))
 check('the contradicted rule is no longer injected', !contexts[0].text().includes(`${posRule}\n`))
 check('the new rule is injected instead', contexts[0].text().includes(negRule))
@@ -244,6 +250,16 @@ const tight = renderPrompt(many, { budget: 400 })
 check('a roomy budget renders every rule', many.every(rule => roomy.includes(rule.text)))
 check('a tight budget drops rules', !tight.includes(many[5].text))
 check('a tight budget discloses the omissions', /more rule\(s\) did not fit the budget/.test(tight))
+
+console.log('\n# pending candidates are named, not merely counted')
+const waitingRule = { id: 'r_waiting1', text: '不要用翻页动画，观感差。', category: 'avoid', status: 'pending', confidence: 0.5, evidenceCount: 1, scope: 'project' }
+const hinted = renderPrompt([waitingRule], { budget: 1200, candidates: [waitingRule] })
+check('the hint names the candidate id', hinted.includes('r_waiting1'))
+check('the hint says the candidate is not applied', hinted.includes('NOT applied'))
+check('the candidate is not rendered as a rule line', !hinted.includes('- [avoid] 不要用翻页动画'))
+const manyWaiting = Array.from({ length: 6 }, (_, index) => ({ ...waitingRule, id: `r_wait${index}`, text: `等待确认的规则 ${index}` }))
+const countedOnly = renderPrompt([], { budget: 400, candidates: manyWaiting })
+check('a tight budget falls back to an exact count', /6 rule\(s\) await review/.test(countedOnly) && !countedOnly.includes('r_wait0'))
 
 console.log('\n# config')
 const defaults = resolveConfig(undefined).config
@@ -285,6 +301,147 @@ check('too-short rules are dropped', parseRules('{"rules":[{"text":"x"}]}', 3).l
 check('rule count is capped', parseRules('{"rules":[{"text":"aaaa"},{"text":"bbbb"},{"text":"cccc"}]}', 2).length === 2)
 check('garbage returns nothing', parseRules('no json here', 3).length === 0)
 
+console.log('\n# capture boundaries and storage round trips')
+check('long explicit paste is rejected instead of truncated', !prefilter('一律'.repeat(400)).ok)
+check('quoted guardrails are not captured', captureText('> 永远不要用 any') === '')
+check('fenced instructions are not captured', captureText('```text\n永远不要用 any\n```') === '')
+check('inline quotation is not a preference', classify(captureText('文档写着“永远不要用 any”')) === null)
+check('multiline lists are not captured', captureText('一律使用 const\n绝对不要用 any') === '')
+const roundTrip = [{ id: 'r_roundtrip', text: 'Use const\r\nwithout reassignment src:example', category: 'code-style', confidence: 0.82, evidenceCount: 3, source: 'tool', status: 'pending', pinned: true, glob: 'src/**' }]
+const restored = parseMarkdown(renderMarkdown(roundTrip), 'project')[0]
+check('multiline serialization normalizes text without losing metadata', restored.text === 'Use const without reassignment src:example' && restored.confidence === 0.82 && restored.status === 'pending' && restored.glob === 'src/**' && restored.pinned)
+const notes = '<!-- personal notes -->\nSome prose.\n## code-style\n- [r_note] Use const @0.82 src:tool ev:1\nTail note.\n'
+check('parse-render preserves unknown lines in place', renderMarkdown(parseMarkdown(notes, 'project')) === notes)
+let rejected = false
+try { await tool.execute({ action: 'add', text: 'Use const\nNever use tabs' }, exec) } catch { rejected = true }
+check('tool rejects multiline input', rejected)
+rejected = false
+try { await tool.execute({ action: 'add', text: 'Use api_key=abcdefghijklmnop' }, exec) } catch { rejected = true }
+check('tool rejects secrets too', rejected)
+
+console.log('\n# automatic proposals cannot change trusted rules')
+const trustedText = 'Use semicolons consistently'
+await tool.execute({ action: 'add', text: trustedText, confidence: 0.9 }, exec)
+await tool.execute({ action: 'propose', text: 'Never use semicolons consistently', confidence: 0.99 }, exec)
+await tool.execute({ action: 'propose', text: 'Never use semicolons consistently', confidence: 0.99 }, exec)
+let rows = parseMarkdown(readProject(), 'project')
+check('automatic conflict leaves trusted original active at 90%', rows.find(row => row.text === trustedText)?.status === 'active' && rows.find(row => row.text === trustedText)?.confidence === 0.9)
+const proposal = rows.find(row => row.text.startsWith('Never use semicolons'))
+check('repeated proposals stay pending at 50%', proposal?.status === 'pending' && proposal.confidence === 0.5)
+await tool.execute({ action: 'approve', id: proposal.id }, exec)
+rows = parseMarkdown(readProject(), 'project')
+check('approving the opposite moves the original to review', rows.find(row => row.text === trustedText)?.status === 'pending')
+check('default writes stay in the project', !existsSync(join(home, 'taste', 'TASTE.md')))
+
+console.log('\n# concurrent transactions and actual usage')
+const concurrent = ['Quartz alpha', 'Zircon beta', 'Topaz gamma', 'Opal delta', 'Ruby epsilon', 'Onyx zeta']
+await Promise.all(concurrent.map(text => tool.execute({ action: 'add', text }, exec)))
+rows = parseMarkdown(readProject(), 'project')
+check('parallel adds do not lose rules', concurrent.every(text => rows.some(row => row.text === text)))
+const usageRules = concurrent.map((text, index) => ({ id: contentId(text), text: `${text} ${String.fromCharCode(97 + index).repeat(170)}`, category: 'code-style', confidence: 0.9, evidenceCount: 1, source: 'tool', status: 'active' }))
+writeFileSync(projectFile, renderMarkdown(usageRules))
+writeFileSync(join(work, '.dsh', 'taste', 'state.json'), '{}')
+const assembled = contexts[0].text()
+check('prompt rendering does not write usage', readFileSync(join(work, '.dsh', 'taste', 'state.json'), 'utf8') === '{}')
+check('full rendered section obeys the configured budget', assembled.length <= 1200)
+const actuallyUsed = usageRules.filter(rule => assembled.includes(rule.text))
+check('budget test drops some rules', actuallyUsed.length > 0 && actuallyUsed.length < usageRules.length)
+const usageList = await tool.execute({ action: 'list' }, exec)
+check('list counts only budget-selected rules', usageList.text.includes(`Injected into the prompt: ${actuallyUsed.length} of ${usageRules.length}`))
+writeFileSync(join(work, '.dsh', 'taste', 'state.json'), JSON.stringify({ r_unrelated: { created: '2026-01-01T00:00:00Z', recalled: 7 } }))
+emit('agent/turn-stopping', { agent: { session } })
+check('usage is batched after the turn', await until(() => {
+  const state = JSON.parse(readFileSync(join(work, '.dsh', 'taste', 'state.json'), 'utf8'))
+  return actuallyUsed.every(rule => state[rule.id]?.recalled === 1) && usageRules.filter(rule => !actuallyUsed.includes(rule)).every(rule => !state[rule.id])
+}))
+check('usage writes merge with the records already on disk', await until(() => JSON.parse(readFileSync(join(work, '.dsh', 'taste', 'state.json'), 'utf8')).r_unrelated?.recalled === 7))
+emit('agent/turn-stopping', { agent: { session } })
+await sleep(50)
+check('duplicate stop events do not double-count usage', actuallyUsed.every(rule => JSON.parse(readFileSync(join(work, '.dsh', 'taste', 'state.json'), 'utf8'))[rule.id]?.recalled === 1))
+const beforeBrokenState = readProject()
+writeFileSync(join(work, '.dsh', 'taste', 'state.json'), '{broken')
+rejected = false
+try { await tool.execute({ action: 'add', text: 'Sapphire theta' }, exec) } catch { rejected = true }
+check('corrupt sidecar fails closed without overwriting rules or state', rejected && readProject() === beforeBrokenState && readFileSync(join(work, '.dsh', 'taste', 'state.json'), 'utf8') === '{broken')
+writeFileSync(join(work, '.dsh', 'taste', 'state.json'), '{}')
+
+console.log('\n# cross-process lock')
+const lockModule = new URL('../lib/lock.js', import.meta.url).href
+const counterPath = join(work, 'counter.json')
+writeFileSync(counterPath, '0')
+const worker = `import {withStoreLock} from ${JSON.stringify(lockModule)}; import {readFile,writeFile} from 'node:fs/promises'; for(let i=0;i<5;i++) await withStoreLock(${JSON.stringify(work)},async()=>{const n=Number(await readFile(${JSON.stringify(counterPath)},'utf8'));await new Promise(r=>setTimeout(r,5));await writeFile(${JSON.stringify(counterPath)},String(n+1));});`
+await Promise.all(Array.from({ length: 3 }, () => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', worker], { stdio: 'inherit' })
+  child.on('error', reject)
+  child.on('exit', code => code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)))
+})))
+check('separate processes cannot overwrite each other', readFileSync(counterPath, 'utf8') === '15')
+
+console.log('\n# extraction failures, retries and input acknowledgements')
+const extractionConfig = resolveConfig({ source: 'none', maxOutputTokens: 256, maxInputChars: 200 }).config
+const signals = [{ text: 'Use const for bindings', kind: 'correction' }, { text: 'x'.repeat(180), kind: 'correction' }]
+let calls = 0
+const extracted = []
+const extraction = await runExtraction({ config: extractionConfig, pending: signals, cwd: work, addRule: async (_cwd, input) => extracted.push(input), callModel: async prompt => {
+  calls += 1
+  if (calls === 1) return { text: '{"rules":[', finishReason: 'length', usage: { outputTokens: 256 } }
+  check('truncation retry raises the token limit', prompt.maxOutputTokens === 1024)
+  return { text: '{"rules":[{"text":"Use const for bindings"}]}' }
+} })
+check('only signals actually sent are acknowledged', extraction.consumed === 1 && extraction.inputChars <= 200)
+check('the starting confidence comes from the host, not the model', extracted[0]?.confidence === 0.5 && extracted[0]?.kind === 'extracted')
+const distilled = []
+await runExtraction({
+  config: extractionConfig,
+  pending: [signals[0]],
+  cwd: work,
+  confidence: 0.62,
+  addRule: async (_cwd, input) => { distilled.push(input) },
+  callModel: async () => '{"rules":[{"text":"Use const for bindings","category":"code-style"}]}',
+})
+check('a distilled rule carries the host confidence', distilled[0]?.confidence === 0.62)
+check('distilled rules start in force', initialState(distilled[0]?.kind, distilled[0]?.confidence).status === 'active')
+check('verbatim captures still wait for review', initialState('explicit', 0.85).status === 'pending' && initialState('explicit', 0.85).base === 0.5)
+check('a proposal waits regardless of the confidence offered', initialState('proposed', 0.99).status === 'pending')
+rejected = false
+try { await runExtraction({ config: extractionConfig, pending: signals, cwd: work, addRule: async () => {}, callModel: async () => 'broken JSON' }) } catch { rejected = true }
+check('malformed extraction rejects rather than reporting zero-rule success', rejected)
+rejected = false
+try { await runExtraction({ config: extractionConfig, pending: signals, cwd: work, addRule: async () => {}, callModel: async () => ({ text: '{"rules":[]}', finishReason: 'length' }) }) } catch { rejected = true }
+check('repeated truncation is an error', rejected)
+
+console.log('\n# settings CSRF boundary and queue restart')
+let route
+let restartedTool
+const restartedHandlers = new Map()
+const secureCtx = {
+  ...ctx,
+  effect: run => run(),
+  get: name => name === 'webServer' ? { register: entry => { route = entry.handler } } : undefined,
+  on: (name, listener) => restartedHandlers.set(name, listener),
+  tools: { register: definition => { restartedTool = definition } },
+}
+apply(secureCtx, { source: 'none' })
+restartedHandlers.get('agent/created')({ agent: { session } })
+check('pending signals survive plugin restart', (await restartedTool.execute({ action: 'learn' }, exec)).text.includes('不要用 any'))
+const requestConfig = async (method, headers = {}, body = {}) => {
+  const request = new EventEmitter()
+  Object.assign(request, { method, headers: { host: 'localhost:1234', ...headers }, socket: {} })
+  const response = { writeHead(status) { this.status = status }, end(text) { this.text = text } }
+  const task = route(request, response)
+  process.nextTick(() => { request.emit('data', JSON.stringify(body)); request.emit('end') })
+  await task
+  return response
+}
+const settings = JSON.parse((await requestConfig('GET')).text)
+check('settings GET issues a CSRF token', typeof settings.csrfToken === 'string')
+check('no-cors POST cannot modify settings', (await requestConfig('POST', { 'content-type': 'text/plain' }, { field: 'source', value: 'custom' })).status === 403)
+const safeHeaders = { 'content-type': 'application/json', 'x-taste-csrf': settings.csrfToken, origin: 'http://localhost:1234' }
+check('wrong origin is rejected even with token', (await requestConfig('POST', { ...safeHeaders, origin: 'https://attacker.invalid' }, { field: 'source', value: 'custom' })).status === 403)
+check('same-origin token-bearing save works', (await requestConfig('POST', safeHeaders, { field: 'source', value: 'none' })).status === 200)
+check('inline key cannot be persisted through settings', (await requestConfig('POST', safeHeaders, { field: 'apiKey', value: 'test-secret' })).status === 400)
+check('no inline secret reaches disk', !readFileSync(join(home, 'taste', 'settings.json'), 'utf8').includes('test-secret'))
+
 console.log('\n# none mode stays useful')
 const home2 = mkdtempSync(join(tmpdir(), 'taste-home2-'))
 const work2 = mkdtempSync(join(tmpdir(), 'taste-work2-'))
@@ -316,7 +473,7 @@ emit2('agent/created', { agent: { session: session2 } })
 check('guidance is injected without a model route', sections2.some(entry => typeof entry.text === 'function' && entry.text().includes('Taste memory')))
 emit2('agent/inbox/claimed', { agent: { session: session2 }, message: { content: [{ type: 'text', text: '不要用 any，改成 unknown' }] } })
 await sleep(300)
-const globalFile2 = join(home2, 'taste', 'TASTE.md')
+const globalFile2 = join(work2, '.dsh', 'taste', 'TASTE.md')
 const noneText = existsSync(globalFile2) ? readFileSync(globalFile2, 'utf8') : ''
 check('correction becomes a pending rule instead of a dead queue entry', noneText.includes('[pending]'))
 check('the correction text is kept', noneText.includes('不要用 any'))
@@ -324,6 +481,8 @@ check('regex mode writes no active rule', !/不要用 any @0\.(5[5-9]|[6-9])/.te
 
 rmSync(home, { recursive: true, force: true })
 rmSync(work, { recursive: true, force: true })
+rmSync(home2, { recursive: true, force: true })
+rmSync(work2, { recursive: true, force: true })
 
-console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`}`)
+console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`} — ${checks} checks`)
 process.exit(failures === 0 ? 0 : 1)

@@ -1,8 +1,11 @@
 {
   "name": "dsh-code-taste",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "description": "Learns your coding taste from explicit instructions and corrections, stores it as confidence-scored rules in editable markdown, and injects them into every session.",
   "type": "module",
+  "scripts": {
+    "test": "node test/harness.mjs && node --test test/review.mjs"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

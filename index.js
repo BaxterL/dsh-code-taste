@@ -6,8 +6,9 @@
  * @module dsh-code-taste
  */
 
-import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { dshHome, tasteDir, writeAtomic } from './lib/paths.js'
 import {
   appendEvidence,
@@ -25,7 +26,8 @@ import {
   saveState,
   similarity,
 } from './lib/store.js'
-import { baseConfidence, classify, inferCategory, negationOf, prefilter, toRuleText } from './lib/signals.js'
+import { baseConfidence, captureText, comparable, classify, inferCategory, negationOf, prefilter, toRuleText } from './lib/signals.js'
+import { withStoreLock } from './lib/lock.js'
 import { ACTIVE_THRESHOLD, isCandidate, renderPrompt, selectRules } from './lib/inject.js'
 import { canExtract, describeConfig, resolveConfig } from './lib/config.js'
 import { coerceField, readSettings, toPublicConfig, writeSettings } from './lib/settings.js'
@@ -49,7 +51,7 @@ export const Config = z.object({
   modelId: z.string().default('').description('Model id at that endpoint, e.g. qwen-plus or qwen2.5-coder:7b'),
   apiKey: z.string().default('').description('Literal key for a custom endpoint; prefer apiKeyEnv'),
   apiKeyEnv: z.string().default('').description('Environment variable that holds the key, e.g. DASHSCOPE_API_KEY'),
-  maxOutputTokens: z.natural().default(256).description('Hard cap on one extraction reply'),
+  maxOutputTokens: z.natural().default(768).description('Initial extraction output cap; truncation retries once up to 2048'),
   temperature: z.number().default(0).description('Sampling temperature, 0 keeps output stable'),
   timeoutMs: z.natural().default(20000).description('Request timeout in milliseconds'),
   injectBudgetChars: z.natural().default(3000).description('Characters of rules injected into the prompt each turn'),
@@ -63,14 +65,18 @@ export const name = 'taste'
 export const inject = ['tools', 'systemPrompt', 'workingDirectory']
 
 const MAX_PENDING = 20
+/**
+ * Verbatim capture keeps the user's raw words and has no model filtering, so it
+ * waits for review. Model-distilled rules have already discarded one-offs, so
+ * they enter force immediately: leaving them at 0.5 kept a learned preference
+ * below the injection threshold for the whole session it was learned for.
+ */
 const AUTO_CONFIDENCE = 0.5
-/** Pasted documents are not corrections; longer messages are left alone. */
-const MAX_CORRECTION_CHARS = 400
+const DISTILLED_CONFIDENCE = 0.62
 const REINFORCE_STEP = 0.1
 const APPROVE_STEP = 0.05
 const CONFIDENCE_CEILING = 0.95
 const SIMILARITY_MERGE = 0.8
-const CONFLICT_PENALTY = 0.25
 
 /** @returns {string} plain text of a user message's content blocks. */
 function messageText(message) {
@@ -97,6 +103,20 @@ function createSessionIdentity() {
     }
     return id
   }
+}
+
+/**
+ * How a new rule starts. Deliberate writes and model-distilled rules are in
+ * force at once; verbatim captures and proposals wait for review.
+ * @param {string} kind - `tool` | `extracted` | `proposed` | a signal kind.
+ * @param {number} [confidence] - caller-supplied score for the confident kinds.
+ * @returns {{base: number, confident: boolean, status: 'active'|'pending'}} initial state.
+ */
+export function initialState(kind, confidence) {
+  const trusted = kind === 'tool'
+  const confident = trusted || kind === 'extracted'
+  const base = confident ? (Number.isFinite(confidence) ? confidence : baseConfidence(kind)) : AUTO_CONFIDENCE
+  return { base, confident, status: confident && base >= ACTIVE_THRESHOLD ? 'active' : 'pending' }
 }
 
 /**
@@ -133,6 +153,7 @@ function reportBootError(ctx, error, stage) {
 }
 
 function start(ctx, rawConfig) {
+  const csrfToken = randomUUID()
   const stored = readSettings()
   const { config, warnings } = resolveConfig({ ...(rawConfig ?? {}), ...stored })
   if (warnings.length > 0) ctx.logger?.warn?.('taste: %s', warnings.join('; '))
@@ -175,12 +196,21 @@ function start(ctx, rawConfig) {
           path: '/dsh-code-taste/config',
           handler: async (request, response) => {
             if (request.method === 'GET') {
-              send(response, 200, { ...toPublicConfig(config), usage: summarize() })
+              send(response, 200, { ...toPublicConfig(config), usage: summarize(), csrfToken })
               return
             }
             if (request.method !== 'POST') {
               response.writeHead(405, { allow: 'GET, POST' })
               response.end()
+              return
+            }
+            const headers = request.headers ?? {}
+            const expectedOrigin = `${request.socket?.encrypted ? 'https' : 'http'}://${headers.host}`
+            if (headers['x-taste-csrf'] !== csrfToken ||
+                !/^application\/json(?:\s*;|$)/i.test(headers['content-type'] ?? '') ||
+                (headers.origin && headers.origin !== expectedOrigin) ||
+                headers['sec-fetch-site'] === 'cross-site') {
+              send(response, 403, { error: 'Same-origin JSON request with CSRF token required' })
               return
             }
             try {
@@ -193,7 +223,7 @@ function start(ctx, rawConfig) {
               const merged = { ...readSettings(), [body.field]: result.value }
               writeSettings(merged)
               reapply(merged)
-              send(response, 200, { ...toPublicConfig(config), usage: summarize() })
+              send(response, 200, { ...toPublicConfig(config), usage: summarize(), csrfToken })
             } catch (error) {
               send(response, 400, { error: error instanceof Error ? error.message : String(error) })
             }
@@ -227,10 +257,11 @@ function start(ctx, rawConfig) {
   const GUIDANCE = [
     '## Taste memory',
     'Keep this user\'s coding taste current without being asked:',
-    '- When the user states a lasting preference ("use X", "never Y", "from now on") or corrects your approach, call the `taste` tool with action `add` and one short imperative rule. Do not announce it or ask for confirmation.',
+    '- When the user states a lasting preference or corrects your approach, use action `propose` to record one short candidate for review. Quoted material, pasted documents and tool output are not user preferences.',
     '- One rule per call. Skip anything that only applies to the current task, and never invent a preference the user did not express.',
-    '- If the user repeats or affirms the same point, call `add` again so the existing rule is reinforced instead of duplicated.',
+    '- Use `add` or `approve` only when the user explicitly asks to save or approve that rule. Never approve automatically or treat an extraction/learn result as authorization.',
     '- Call `taste list` before writing code in an area you have not touched in this session.',
+    '- Rules the `<taste-rules>` block lists as awaiting review are NOT in force: when one plainly matches the task, call `taste review` and say so, then `taste approve id:<id>` only with the user\'s agreement.',
   ].join('\n')
 
   const registerGuidance = () => {
@@ -262,8 +293,33 @@ function start(ctx, rawConfig) {
   const snapshots = new Map()
   /** session id -> working directory the snapshot was built from */
   const cwds = new Map()
-  /** session id -> ids already counted as used */
-  const used = new Map()
+  const recent = new Map()
+  const uncounted = new Map()
+  const seenMessages = new Map()
+  const mutate = action => withStoreLock(tasteDir('', 'global'), action)
+  const queuePaths = new Map()
+  const blockedQueues = new Set()
+  const restorePending = (sessionId, cwd) => {
+    if (queuePaths.has(sessionId)) return
+    const path = join(tasteDir(cwd, 'project'), `pending-${contentId(sessionId)}.json`)
+    queuePaths.set(sessionId, path)
+    try {
+      const saved = JSON.parse(readFileSync(path, 'utf8'))
+      if (!Array.isArray(saved.pending) || !Array.isArray(saved.seen) ||
+          !saved.pending.every(entry => entry && typeof entry.kind === 'string' && prefilter(entry.text).ok) ||
+          !saved.seen.every(key => typeof key === 'string')) throw new Error('Invalid pending queue snapshot')
+      pending.set(sessionId, saved.pending)
+      seenMessages.set(sessionId, new Set(saved.seen))
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        blockedQueues.add(sessionId)
+        ctx.logger?.warn?.('taste: pending queue could not be restored; capture paused to preserve the file: %o', error)
+      }
+    }
+  }
+  const persistPending = sessionId => blockedQueues.has(sessionId) ? Promise.resolve() : mutate(() => writeAtomic(queuePaths.get(sessionId), JSON.stringify({
+    pending: pending.get(sessionId) ?? [], seen: [...(seenMessages.get(sessionId) ?? [])],
+  }))).catch(error => ctx.logger?.warn?.('taste: pending queue write failed: %o', error))
   let fallbackRegistered = false
   let fallbackSessionId
 
@@ -302,42 +358,57 @@ function start(ctx, rawConfig) {
     snapshots.set(sessionId, mergeFor(cwd))
   }
 
-  /** Rebuild every live session snapshot that belongs to one workspace. */
-  const refreshWorkspace = cwd => {
+  /** Global rules can affect every live workspace. */
+  const refreshWorkspace = () => {
     for (const [sessionId, path] of cwds) {
-      if (path === cwd) snapshots.set(sessionId, mergeFor(cwd))
+      snapshots.set(sessionId, mergeFor(path))
     }
   }
 
   const renderFor = sessionId => {
+    const cwd = cwds.get(sessionId)
+    if (cwd) refresh(sessionId, cwd)
     const rules = snapshots.get(sessionId) ?? []
-    // Count decayed-out active rules too: otherwise they vanish from the prompt
-    // with no hint that `taste review` can bring them back.
-    const pendingCount = rules.filter(isCandidate).length
-    markUsed(sessionId, rules)
-    return renderPrompt(rules, { pendingCount, budget: config.injectBudgetChars })
+    // Candidates are listed, not merely counted: a bare number tells a reader that
+    // something waits for review but not what, which is how a learned rule stayed
+    // invisible to both the model and the user. Decayed actives count as candidates.
+    const waiting = rules.filter(isCandidate)
+    const injected = []
+    const text = renderPrompt(rules, { candidates: waiting, budget: config.injectBudgetChars, onSelected: chosen => injected.push(...chosen) })
+    // The host may assemble a prompt several times per turn, so keep the union:
+    // usage accounting must not shrink to whichever render happened last.
+    const previous = uncounted.get(sessionId) ?? []
+    const union = [...previous, ...injected].filter((rule, index, all) => all.findIndex(item => item.id === rule.id && item.scope === rule.scope) === index)
+    recent.set(sessionId, union)
+    uncounted.set(sessionId, union)
+    return text
   }
 
   const markUsed = (sessionId, rules) => {
     const cwd = cwds.get(sessionId)
     if (cwd === undefined) return
-    const chosen = selectRules(rules)
+    // The same id can arrive from two scopes or from a repeated render; count each once.
+    const chosen = [...new Map(rules.map(rule => [`${rule.scope}:${rule.id}`, rule])).values()]
     if (chosen.length === 0) return
-    for (const rule of chosen) {
-      const dir = tasteDir(cwd, rule.scope === 'global' ? 'global' : 'project')
-      // usage is best-effort bookkeeping; a failure must never break assembly
-      loadState(dir)
-        .then(state => {
+    mutate(async () => {
+      for (const scope of ['project', 'global']) {
+        const selected = chosen.filter(rule => rule.scope === scope)
+        if (!selected.length) continue
+        const dir = tasteDir(cwd, scope)
+        // Re-read inside the lock: a write that only carried its own snapshot is
+        // how unrelated usage records disappeared from state.json.
+        const state = await loadState(dir)
+        for (const rule of selected) {
           const record = state[rule.id] ?? { created: new Date().toISOString() }
           state[rule.id] = {
             ...record,
             lastUsed: new Date().toISOString(),
             recalled: (record.recalled ?? 0) + 1,
           }
-          return saveState(dir, state)
-        })
-        .catch(() => {})
-    }
+        }
+        await saveState(dir, state)
+      }
+    }).catch(error => ctx.logger?.warn?.('taste: usage write failed: %o', error))
   }
 
   const registerContext = (scoped, sessionId) => {
@@ -378,16 +449,25 @@ function start(ctx, rawConfig) {
     return undefined
   }
 
-  const addRule = async (cwd, input) => {
-    const scope = input.scope === 'project' ? 'project' : 'global'
+  const addRule = (cwd, input) => mutate(async () => {
+    const filtered = prefilter(input.text)
+    if (!filtered.ok || /[\r\n]/.test(input.text) || input.text.length > 200) throw new Error('Rule must be a single short sentence without secrets (max 200 characters)')
+    input = { ...input, text: filtered.text }
+    for (const key of ['category', 'glob']) {
+      if (input[key] && /[\r\n\[\]]/.test(input[key])) throw new Error(`Invalid ${key}`)
+    }
+    const trusted = input.kind === 'tool'
+    const { base, confident, status: initialStatus } = initialState(input.kind, input.confidence)
+    const scope = input.scope === 'global' ? 'global' : 'project'
     const dir = tasteDir(cwd, scope)
     const rules = await loadScope(dir, scope)
     const state = await loadState(dir)
     const identity = identityOf(input.text)
-    let existing = rules.find(rule => identityOf(rule.text) === identity)
+    let existing = rules.find(rule => identityOf(rule.text) === identity && rule.glob === input.glob)
     if (!existing) {
       let best = 0
       for (const rule of rules) {
+        if (!comparable(rule.text, input.text) || rule.glob !== input.glob) continue
         const score = similarity(rule.text, input.text)
         if (score > best) {
           best = score
@@ -396,17 +476,16 @@ function start(ctx, rawConfig) {
       }
       if (best < SIMILARITY_MERGE) existing = undefined
     }
-    if (existing && negationOf(existing.text) !== negationOf(input.text)) {
+    if (existing && negationOf(existing.text) !== negationOf(input.text)) existing = undefined
+    if (confident && base >= ACTIVE_THRESHOLD) {
       // Opposite polarity is a conflict, never a duplicate: "Do not use const"
       // reaches 1.0 similarity with "Use const", and merging would reinforce the
       // rule the user just reversed. Demote the contradicted rules instead.
       const conflicting = rules.filter(
-        rule => similarity(rule.text, input.text) >= SIMILARITY_MERGE && negationOf(rule.text) !== negationOf(input.text),
+        rule => rule.status !== 'archived' && comparable(rule.text, input.text) && rule.glob === input.glob && similarity(rule.text, input.text) >= SIMILARITY_MERGE && negationOf(rule.text) !== negationOf(input.text),
       )
       for (const old of conflicting) {
-        // Drop below the injection threshold: a contradicted rule must stop
-        // steering the agent immediately, but stays reviewable in `review`.
-        old.confidence = Math.max(0.1, Math.min(ACTIVE_THRESHOLD - 0.01, old.confidence - CONFLICT_PENALTY))
+        // Withhold the conflict for review without destroying its confidence.
         old.status = 'pending'
         old.ineffective = (old.ineffective ?? 0) + 1
         await appendEvidence(dir, {
@@ -416,19 +495,18 @@ function start(ctx, rawConfig) {
           quote: `superseded by: ${input.text}`.slice(0, 200),
         })
       }
-      existing = undefined
     }
     const now = new Date().toISOString()
-    const base = typeof input.confidence === 'number' ? input.confidence : baseConfidence(input.kind)
     let rule
     let created = false
     if (existing) {
-      existing.confidence = Math.min(CONFIDENCE_CEILING, existing.confidence + REINFORCE_STEP)
+      if (confident) existing.confidence = Math.min(CONFIDENCE_CEILING, Math.max(base, existing.confidence + REINFORCE_STEP))
       existing.evidenceCount += 1
-      if (existing.evidenceCount >= 2) existing.status = 'active'
-      if (input.category) existing.category = input.category
-      if (input.glob) existing.glob = input.glob
-      state[existing.id] = { created: state[existing.id]?.created ?? now, lastSeen: now }
+      // A second, agreeing distillation promotes a rule that was still on review.
+      if (confident && base >= ACTIVE_THRESHOLD) existing.status = 'active'
+      if (trusted && input.category) existing.category = input.category
+      if (trusted && input.glob) existing.glob = input.glob
+      if (confident) state[existing.id] = { ...state[existing.id], created: state[existing.id]?.created ?? now, lastSeen: now }
       rule = existing
     } else {
       created = true
@@ -441,10 +519,12 @@ function start(ctx, rawConfig) {
         confidence: Math.min(CONFIDENCE_CEILING, Math.max(0.1, base)),
         evidenceCount: 1,
         source: input.source ?? input.kind ?? 'explicit',
-        status: base >= 0.55 ? 'active' : 'pending',
+        status: initialStatus,
         pinned: input.pinned === true,
         ineffective: 0,
       }
+      if (rules.some(old => old.id === rule.id)) rule.id = contentId(`${input.text} ${input.glob ?? ''}`, 32)
+      if (rules.some(old => old.id === rule.id)) throw new Error('Rule id collision; no data was overwritten')
       state[rule.id] = { created: now, lastSeen: now }
       rules.push(rule)
     }
@@ -458,38 +538,46 @@ function start(ctx, rawConfig) {
       quote: String(input.quote ?? input.text).slice(0, 200),
     })
     return { rule, created }
-  }
+  })
 
-  const reinforceRule = async (cwd, id) => {
+  const reinforceRule = (cwd, id) => mutate(async () => {
     const found = await findRule(cwd, id)
     if (!found) return false
     const { dir, scope, rules, rule } = found
+    if (rule.status !== 'active') return false
     rule.confidence = Math.min(CONFIDENCE_CEILING, rule.confidence + REINFORCE_STEP)
     rule.evidenceCount += 1
     rule.status = 'active'
     const state = await loadState(dir)
-    state[id] = { created: state[id]?.created ?? new Date().toISOString(), lastSeen: new Date().toISOString() }
+    state[id] = { ...state[id], created: state[id]?.created ?? new Date().toISOString(), lastSeen: new Date().toISOString() }
     await saveScope(dir, scope, rules)
     await saveState(dir, state)
     await appendEvidence(dir, { id, at: new Date().toISOString(), kind: 'positive', quote: 'positive feedback' })
     return true
-  }
+  })
 
-  const approveRule = async (cwd, id) => {
+  const approveRule = (cwd, id) => mutate(async () => {
     const found = await findRule(cwd, id)
     if (!found) return false
     const { dir, scope, rules, rule } = found
+    for (const old of rules) {
+      if (old.id !== id && old.status !== 'archived' && old.glob === rule.glob && comparable(old.text, rule.text) &&
+          similarity(old.text, rule.text) >= SIMILARITY_MERGE && negationOf(old.text) !== negationOf(rule.text)) {
+        old.status = 'pending'
+        await appendEvidence(dir, { id: old.id, at: new Date().toISOString(), kind: 'conflict', quote: `superseded by approved rule: ${rule.text}` })
+      }
+    }
     rule.status = 'active'
     rule.confidence = Math.min(CONFIDENCE_CEILING, Math.max(rule.confidence, 0.6) + APPROVE_STEP)
     const state = await loadState(dir)
-    state[id] = { created: state[id]?.created ?? new Date().toISOString(), lastSeen: new Date().toISOString() }
+    state[id] = { ...state[id], created: state[id]?.created ?? new Date().toISOString(), lastSeen: new Date().toISOString() }
     await saveScope(dir, scope, rules)
     await saveState(dir, state)
     await appendEvidence(dir, { id, at: new Date().toISOString(), kind: 'approved', quote: 'approved by user' })
     return true
-  }
+  })
 
-  const forgetRule = async (cwd, id, requestedScope) => {
+  const forgetRule = (cwd, id, requestedScope) => mutate(async () => {
     let removed = 0
     const scopes = requestedScope === 'global' ? ['global'] : requestedScope === 'project' ? ['project'] : ['project', 'global']
     for (const scope of scopes) {
@@ -504,7 +592,7 @@ function start(ctx, rawConfig) {
       await saveState(dir, state)
     }
     return removed
-  }
+  })
 
   const exportTaste = async (cwd, format) => {
     const exportDir = join(tasteDir(cwd, 'project'), 'export')
@@ -539,7 +627,7 @@ function start(ctx, rawConfig) {
   /** Resolve the model route the user picked: none / host / custom. */
   const resolveCallModel = () => {
     if (config.model.source === 'custom') {
-      return prompt => complete(config, prompt)
+      return prompt => complete({ ...config, model: { ...config.model, maxOutputTokens: prompt.maxOutputTokens ?? config.model.maxOutputTokens } }, prompt)
     }
     const llm = ctx.get?.('llm')
     const selection = ctx.get?.('agentDefaultModel')?.currentSelection?.()
@@ -552,7 +640,7 @@ function start(ctx, rawConfig) {
     }
     return prompt =>
       completeWithHost(llm, selection, prompt, {
-        maxOutputTokens: config.model.maxOutputTokens,
+        maxOutputTokens: prompt.maxOutputTokens ?? config.model.maxOutputTokens,
         temperature: config.model.temperature,
       })
   }
@@ -572,11 +660,13 @@ function start(ctx, rawConfig) {
     lastExtract.set(sessionId, Date.now())
     const startedAt = Date.now()
     const route = config.model.source === 'host' ? 'host' : `${config.model.format}:${config.model.model}`
-    runExtraction({ config, pending: batch, cwd, addRule, callModel })
+    runExtraction({ config, pending: batch, cwd, addRule, callModel, confidence: DISTILLED_CONFIDENCE })
       .then(result => {
         const stored = result?.stored ?? 0
-        const rest = (pending.get(sessionId) ?? []).filter(entry => !batch.includes(entry))
+        const consumed = batch.slice(0, result.consumed ?? 0)
+        const rest = (pending.get(sessionId) ?? []).filter(entry => !consumed.includes(entry))
         pending.set(sessionId, rest)
+        persistPending(sessionId)
         refreshWorkspace(cwd)
         recordUsage({
           source: config.model.source,
@@ -612,6 +702,7 @@ function start(ctx, rawConfig) {
     const sessionId = sessionIdOf(session)
     try {
       refresh(sessionId, cwdOf(session))
+      restorePending(sessionId, cwdOf(session))
       registerContext(this, sessionId)
     } catch (error) {
       ctx.logger?.warn?.('taste: session initialisation failed: %o', error)
@@ -621,47 +712,54 @@ function start(ctx, rawConfig) {
   ctx.on('agent/inbox/claimed', payload => {
     const session = payload?.agent?.session
     if (!session) return
-    const filtered = prefilter(messageText(payload?.message))
+    const filtered = prefilter(captureText(messageText(payload?.message)))
     if (!filtered.ok) return
     const signal = classify(filtered.text)
     if (signal === null) return
-    // A pasted document that happens to contain "不要" is not a correction. This
-    // is how a PR template once became a rule starting "ok我加了，别人的文案…".
-    if (signal.kind === 'correction' && filtered.text.length > MAX_CORRECTION_CHARS) return
     const sessionId = sessionIdOf(session)
     const cwd = cwdOf(session)
+    restorePending(sessionId, cwd)
+    if (blockedQueues.has(sessionId)) return
+    const seen = seenMessages.get(sessionId) ?? new Set()
+    const messageKey = payload?.message?.id ?? contentId(filtered.text)
+    if (seen.has(messageKey)) return
+    seen.add(messageKey)
+    seenMessages.set(sessionId, seen)
+    persistPending(sessionId)
 
     if (signal.kind === 'positive') {
-      const rules = snapshots.get(sessionId) ?? []
-      const target = selectRules(rules)[0]?.id
+      const injected = recent.get(sessionId) ?? []
+      const target = injected.length === 1 ? injected[0].id : undefined
       if (target !== undefined) {
         reinforceRule(cwd, target)
-          .then(() => refresh(sessionId, cwd))
+          .then(() => refreshWorkspace(cwd))
           .catch(error => ctx.logger?.warn?.('taste: reinforcement failed: %o', error))
       }
       return
     }
 
     const queue = pending.get(sessionId) ?? []
-    queue.push({ text: filtered.text, kind: signal.kind, patterns: signal.patterns, at: new Date().toISOString() })
-    while (queue.length > MAX_PENDING) queue.shift()
+    const immediate = signal.kind === 'explicit' || signal.kind === 'guardrail' || !canExtract(config) || queue.length >= MAX_PENDING
+    const entry = { text: filtered.text, kind: signal.kind, patterns: signal.patterns, at: new Date().toISOString() }
+    queue.push(entry)
     pending.set(sessionId, queue)
+    persistPending(sessionId)
 
-    if (signal.kind === 'explicit' || signal.kind === 'guardrail' || !canExtract(config)) {
-      // Explicit and guardrail statements are safe to write immediately. With no
-      // model route there is nothing to distil a correction with either, so the
-      // regex result is kept as a pending candidate instead of a queued message
-      // that nothing will ever drain.
-      const immediate = signal.kind === 'explicit' || signal.kind === 'guardrail'
+    if (immediate) {
+      // All automatic paths, including queue overflow, persist reviewable candidates.
       addRule(cwd, {
         text: toRuleText(filtered.text),
         kind: signal.kind,
         patterns: signal.patterns,
-        confidence: immediate ? signal.weight : AUTO_CONFIDENCE,
+        confidence: AUTO_CONFIDENCE,
         source: signal.kind,
         quote: filtered.text,
       })
-        .then(() => refresh(sessionId, cwd))
+        .then(() => {
+          pending.set(sessionId, (pending.get(sessionId) ?? []).filter(item => item !== entry))
+          persistPending(sessionId)
+          refreshWorkspace(cwd)
+        })
         .catch(error => ctx.logger?.warn?.('taste: auto-learn failed: %o', error))
     }
   })
@@ -669,6 +767,9 @@ function start(ctx, rawConfig) {
   ctx.on('agent/turn-stopping', payload => {
     const session = payload?.agent?.session
     if (!session) return
+    const sessionId = sessionIdOf(session)
+    markUsed(sessionId, uncounted.get(sessionId) ?? [])
+    uncounted.delete(sessionId)
     maybeExtract(sessionIdOf(session), cwdOf(session))
   })
 
@@ -683,6 +784,7 @@ function start(ctx, rawConfig) {
       sessionIdOf,
       configText: () => describeConfig(config, warnings),
       usageText: () => describeUsage(),
+      injectBudget: () => config.injectBudgetChars,
       readMerged: async cwd => mergeFor(cwd),
       addRule: async (cwd, input) => {
         const result = await addRule(cwd, input)
@@ -707,8 +809,7 @@ function start(ctx, rawConfig) {
       },
       takePending: sessionId => {
         const queue = pending.get(sessionId) ?? []
-        pending.set(sessionId, [])
-        return queue
+        return queue.map(entry => ({ ...entry }))
       },
     }),
   )

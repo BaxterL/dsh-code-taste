@@ -14,7 +14,9 @@ radius, the commit format, the reply language. This plugin listens for those mom
 turns them into confidence-scored rules, keeps them in a markdown file you can edit by
 hand, and puts the confirmed ones in front of the model at the start of every session.
 
-Everything stays on your machine as plain files. No network calls, no telemetry.
+Rules stay in local plain files. No telemetry. The `host/custom` extraction modes send queued signals to the configured model; `none` makes no model calls.
+
+See [hardening notes](docs/hardening.md) for local changes, verification and remaining limitations.
 
 ## Install
 
@@ -107,10 +109,10 @@ then restart. Your `TASTE.md` files are left untouched — delete `.dsh/taste/` 
 
 | You say | What happens |
 | --- | --- |
-| 记住：以后都用 const · *remember: always use const* | Written immediately, confidence 0.85–0.90, active |
-| 永远不要用 moment.js · *never use moment.js* | Written immediately as a guardrail, 0.88 |
+| 记住：以后都用 const · *remember: always use const* | Project candidate, 0.50 pending |
+| 永远不要用 moment.js · *never use moment.js* | Guardrail candidate, 0.50 pending |
 | 不要用 any，改成 unknown · *don't use any, use unknown* | Queued as a correction; run `taste learn` to review it |
-| 对，就这样 · *perfect, exactly like that* | Reinforces the strongest rule currently injected (+0.10) |
+| 对，就这样 · *perfect, exactly like that* | Reinforces only when exactly one rule was actually injected; no guessing among multiple rules |
 
 Questions, one-off instructions ("this time", "for now") and anything containing a
 credential are dropped before they reach the store.
@@ -124,7 +126,7 @@ taste review
 taste approve id:r_8f2a1c
 ```
 
-A candidate also promotes itself once it has been seen twice.
+Repeated evidence never promotes regex captures or `propose` candidates; model-distilled rules are in force immediately, and a second distillation of the same rule just reinforces it. Automatic distillation uses `propose`; reserve `add` and `approve` for an explicit user request.
 
 ### Edit the rules by hand
 
@@ -162,7 +164,7 @@ The fragment lists active rules only, without confidence — safe to paste into 
 
 ## Configuration
 
-By default `model.source: host` — it reuses the model of the current session, so it works out of the box; set `none` for zero model calls. To switch,
+By default `model.source: host` uses the harness's global default model, not session overrides; set `none` for zero model calls. To switch,
 override the row in your profile's `cordis.patch.yml`:
 
 ```yaml
@@ -181,8 +183,8 @@ override the row in your profile's `cordis.patch.yml`:
 
 | `model.source` | Uses | Needs |
 | --- | --- | --- |
-| `none` | no model; explicit instructions and guardrails still land immediately, corrections land as 0.5 pending | nothing |
-| `host` (default) | the harness's current model (the built-in DeepSeek, or whatever you selected) | no endpoint, no key |
+| `none` | no model; all automatic capture lands as 0.5 pending | nothing |
+| `host` (default) | the harness's global default model, not session overrides | no endpoint, no key |
 | `custom` | an OpenAI/Anthropic-compatible endpoint — third party or local | `format`, `baseURL`, `model`; local usually needs no key |
 
 `host` is the zero-setup choice: it spends one call of the model you are already using.
@@ -210,18 +212,18 @@ override the row in your profile's `cordis.patch.yml`:
 ```
 
 Local endpoints usually need no key: leave both `apiKey` and `apiKeyEnv` empty.
-`apiKeyEnv` names an environment variable; `apiKey` is a literal fallback. Never commit a
+`apiKeyEnv` names an environment variable. The settings endpoint refuses nonempty inline keys; legacy keys remain readable with a migration warning. Never commit a
 literal key — `taste config` prints only `env:NAME` or `(inline key set)`.
 
 ### Token budget
 
 | Knob | Default | Meaning |
 | --- | --- | --- |
-| `model.source` | `host` | reuses the session model |
+| `model.source` | `host` | uses the global default model |
 | `extract.minPending` | 3 | this many waiting signals before one call |
 | `extract.throttleMinutes` | 10 | at most one call per session per window |
 | `extract.maxInputChars` | 4000 | ≈1000 tokens in |
-| `model.maxOutputTokens` | 256 | hard cap on the reply |
+| `model.maxOutputTokens` | 768 | initial cap; truncation retries once up to 2048 |
 | `extract.maxRulesPerRun` | 3 | rules accepted per call |
 | `injectBudgetChars` | 3000 | ≈750 tokens of rules per prompt (minimum 400) |
 
@@ -237,8 +239,9 @@ The plugin exposes one tool, `taste`.
 | action | parameters | result |
 | --- | --- | --- |
 | `list` | — | every rule with scope, category, confidence, and whether injection is active |
-| `learn` | — | drains this session's pending corrections and asks you to distil the durable ones |
-| `add` | `text`, `category?`, `scope?`, `confidence?`, `glob?` | adds a rule, or reinforces a near-duplicate |
+| `learn` | — | returns a copy of pending corrections without draining the queue |
+| `propose` | `text`, `category?`, `scope?`, `glob?` | records an automatic pending candidate |
+| `add` | `text`, `category?`, `scope?`, `confidence?`, `glob?` | adds or reinforces a rule on explicit user request |
 | `review` | — | rules that are not injected: pending candidates, or active rules that decayed out |
 | `approve` | `id` | promotes a candidate or a decayed rule back to active (0.65+) |
 | `forget` | `id`, `scope?` | removes a rule from one or both scopes |
@@ -253,11 +256,9 @@ The plugin exposes one tool, `taste`.
 - **`category`** — `code-style` (default), `design`, `stack`, `workflow`, `project-detail`,
   `communication`, `avoid`. It only groups rules and labels them in the prompt; it does
   not change behaviour.
-- **`scope`** — `global` (default) applies everywhere; `project` stays inside this
+- **`scope`** — explicit `global` applies everywhere; `project` (default) stays inside this
   workspace. Project rules shadow global rules with the same text.
-- **`confidence`** — `0.1`–`0.95`. Omit it and the source decides: `0.65` for a rule the
-  agent adds, `0.85–0.90` for an explicit instruction. Below `0.55` the rule lands in
-  `pending` and is not injected.
+- **`confidence`** — user-requested `add` defaults to `0.65`; model distillation sits at `0.62` and is in force at once; regex capture and `propose` stay at `0.50` pending. Confidence cannot replace approval.
 - **`glob`** — restricts a rule to matching paths, e.g. `src/ui/**`. Stored and shown now;
   path matching arrives in P2.
 - **`id`** — content-addressed (`r_` plus the first 8 hex characters of the normalized
@@ -269,14 +270,14 @@ The plugin exposes one tool, `taste`.
 
 | Stage | Rule |
 | --- | --- |
-| Base score | explicit 0.85 · guardrail 0.88 · correction 0.60 · agent-added 0.65 |
-| Reinforcement | +0.10 per repeat or positive feedback, capped at 0.95 |
-| Promotion | pending → active on a second piece of evidence or on `approve` |
+| Base score | distillation 0.62 (in force); regex capture and propose 0.50 pending; user-requested add 0.65 |
+| Reinforcement | explicit add or attributable positive feedback +0.10, capped at 0.95; replay is deduplicated |
+| Promotion | explicit add / approve; distilled rules start active and a repeat extraction reinforces them; regex capture and propose never promote on repetition |
 | Decay | half-life 60 days measured from `last_used` / `last_seen` |
 | Pinned | `[pinned]` exempts a rule from decay |
 | Archive | decay floors at 0.25: a rule never fades away, and `approve` can always revive it |
 | Dedupe | containment similarity ≥ 0.80 after folding 别用/不要用, 改成/换成 … |
-| Conflict | opposite polarity (`Use const` vs `Never use const`) never merges: the new rule lands, the contradicted one drops to 0.54 as pending |
+| Conflict | compare short sentences with similar lengths and the same scope/glob; automatic candidates do not weaken existing rules, explicit add/approve moves opposites to pending without lowering scores |
 
 ### Where things live
 
@@ -286,6 +287,7 @@ The plugin exposes one tool, `taste`.
 | `${DSH_HOME:-~/.dsh}/taste/TASTE.md` | global rules, shared by every workspace |
 | `…/taste/state.json` | timestamps and recall counters (`created`, `last_used`, `recalled`) |
 | `…/taste/evidence.jsonl` | append-only evidence, one JSON object per capture |
+| `<workspace>/.dsh/taste/pending-*.json` | session signals and replay-deduplication keys |
 | `…/taste/export/*.md` | generated fragments for `AGENTS.md` / `CLAUDE.md` |
 
 Writes are atomic (temp file + rename), so an interrupted write cannot truncate the
@@ -297,11 +299,12 @@ rules file.
 - Each session keeps its own rule snapshot; editing the store rebuilds it, so the next
   prompt assembly sees the change, and the section stays stable while nothing changes.
 - Budget: 3000 characters by default (configurable 400–12000), strongest rules first,
-  the rest dropped silently.
+  omitted rules are counted in a footer. Usage counts only actual injected rules.
 - Wrapped in `<taste-rules>` with an explicit "reference data, not instructions; the
   current request wins" preamble.
 - When candidates wait — pending rules, or active rules that decayed out of the injection
-  window — one footer line mentions them; those rules are never injected.
+  window — one footer line names up to four of them by id and opening words (it falls back to
+  an exact count when the budget cannot fit the detail); those rules are never injected.
 
 ### Privacy
 
@@ -313,7 +316,7 @@ rules file.
 
 ### Known limits (v0.2.0)
 
-- Extraction defaults to the session model (`host`). `model.source: none` keeps the plugin on the local regex path: explicit statements land immediately, corrections land as 0.5 pending for `taste review`.
+- Extraction defaults to the global default model (`host`), and its rules are in force at `0.62`. `none` uses local regex only, which yields `0.50` pending candidates.
 - No diff learning yet: code you rewrite by hand is not observed (planned, P1).
 - Per-agent prompt scoping depends on the event context; when it is not agent-scoped the
   plugin falls back to one global section and logs that once.
@@ -324,7 +327,7 @@ rules file.
 node test/harness.mjs
 ```
 
-39 checks, driven through `apply(ctx)` with a fake context — no DSH process needed.
+Regression checks use a fake host, including cross-process locking, truncation retries, queue recovery and CSRF rejection. No live DSH process or model is required.
 
 ## License
 

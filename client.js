@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
 
     const SOURCES = [
       ['none', '不使用模型（只做确定性采集）'],
-      ['host', '跟随当前会话模型（默认，自带 DeepSeek）'],
+      ['host', '使用宿主全局默认模型（不跟随会话临时切换）'],
       ['custom', '第三方 / 本地模型（OpenAI 或 Anthropic 兼容）'],
     ]
 
@@ -139,7 +139,7 @@ window.__ModuleLoader__.load({
     function summarize(value) {
       if (!value) return ''
       if (value.source === 'none') return '抽取模型：不使用（零调用）'
-      if (value.source === 'host') return '抽取模型：跟随当前会话'
+      if (value.source === 'host') return '抽取模型：宿主全局默认'
       return `抽取模型：${value.format} · ${value.modelId || '未选模型'}`
     }
 
@@ -169,7 +169,7 @@ window.__ModuleLoader__.load({
         setValue(current => (current ? { ...current, [field]: next } : current))
         request({
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', 'x-taste-csrf': value.csrfToken },
           body: JSON.stringify({ field, value: next }),
         })
           .then(body => {
