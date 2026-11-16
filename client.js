@@ -37,6 +37,14 @@ window.__ModuleLoader__.load({
       ['maxRulesPerRun', '单次规则数', '一次抽取最多接受几条规则'],
     ]
 
+    const LOG_LEVELS = [
+      ['error', '只记错误'],
+      ['warn', '错误 + 警告'],
+      ['info', '常规（默认）'],
+      ['debug', '全部细节'],
+      ['none', '不写日志文件'],
+    ]
+
     /** Fetch JSON, but never let an empty or non-JSON body surface as a raw parse error. */
     async function request(init) {
       const response = await fetch(ENDPOINT, init)
@@ -312,6 +320,17 @@ window.__ModuleLoader__.load({
           ),
         ),
 
+        React.createElement('div', { style: S.section }, '诊断日志'),
+        React.createElement(
+          Row,
+          { title: '日志级别', hintText: '写到 ~/.dsh/taste/logs/taste.log，可用 `taste logs` 读回' },
+          React.createElement(
+            'select',
+            { style: S.control, value: value.logLevel ?? 'info', onChange: event => save('logLevel', event.target.value) },
+            LOG_LEVELS.map(([key, text]) => React.createElement('option', { key, value: key }, text)),
+          ),
+        ),
+
         value.usage && value.usage.calls > 0
           ? React.createElement(
               'div',
@@ -325,7 +344,7 @@ window.__ModuleLoader__.load({
           : React.createElement(
               'div',
               { style: S.footer },
-              '改完即生效。规则文件：~/.dsh/taste/TASTE.md（全局）或 <工作区>/.dsh/taste/TASTE.md（项目）。',
+              '改完即生效。规则文件：~/.dsh/taste/TASTE.md（全局）或 <工作区>/.dsh/taste/TASTE.md（项目）。诊断日志：~/.dsh/taste/logs/taste.log，也可以让 agent 调用 `taste logs`。',
             ),
       )
 

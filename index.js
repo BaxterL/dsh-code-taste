@@ -35,6 +35,7 @@ import { describeUsage, recordUsage, summarize } from './lib/usage.js'
 import { complete, completeWithHost } from './lib/llm.js'
 import { runExtraction } from './lib/extract.js'
 import { createTasteTool } from './lib/tool.js'
+import { clearLogs, formatLogs, getLogger, logPath } from './lib/log.js'
 import z from '@deepseek-ai/schemastery'
 
 /**
@@ -59,6 +60,7 @@ export const Config = z.object({
   throttleMinutes: z.natural().default(10).description('Minutes between two extraction calls per session'),
   maxInputChars: z.natural().default(4000).description('Characters of pending text sent to the model'),
   maxRulesPerRun: z.natural().default(3).description('Rules accepted from one extraction call'),
+  logLevel: z.union(['error', 'warn', 'info', 'debug', 'none']).default('info').description('Verbosity written to ~/.dsh/taste/logs/taste.log; none disables the file'),
 })
 
 export const name = 'taste'
@@ -143,6 +145,13 @@ function reportBootError(ctx, error, stage) {
   } catch {
     // logging must never be the thing that fails
   }
+  // The structured log is the durable copy: the console scrolls away and the
+  // profile never shows it again.
+  try {
+    getLogger().error('boot-error', { stage, error })
+  } catch {
+    // a broken log must not replace the original failure
+  }
   try {
     const dir = join(dshHome(), 'taste')
     mkdirSync(dir, { recursive: true })
@@ -156,7 +165,12 @@ function start(ctx, rawConfig) {
   const csrfToken = randomUUID()
   const stored = readSettings()
   const { config, warnings } = resolveConfig({ ...(rawConfig ?? {}), ...stored })
-  if (warnings.length > 0) ctx.logger?.warn?.('taste: %s', warnings.join('; '))
+  const log = getLogger({ level: config.logLevel })
+  log.info('boot', { version: '0.11.4', source: config.model.source, injectBudgetChars: config.injectBudgetChars, warnings: warnings.length })
+  if (warnings.length > 0) {
+    ctx.logger?.warn?.('taste: %s', warnings.join('; '))
+    log.warn('config-warning', { warnings })
+  }
 
   /**
    * One route for the settings card: read the effective values, write one field.
@@ -166,6 +180,7 @@ function start(ctx, rawConfig) {
   const registerSettingsRoute = webServer => {
     if (!webServer || typeof webServer.register !== 'function') {
       ctx.logger?.warn?.('taste: webServer service is unavailable; the settings card cannot save')
+      log.warn('settings-route-unavailable')
       return
     }
     const send = (response, status, body) => {
@@ -296,6 +311,19 @@ function start(ctx, rawConfig) {
   const recent = new Map()
   const uncounted = new Map()
   const seenMessages = new Map()
+  /**
+   * Keep the per-session maps bounded. A long-lived app accumulates one entry per
+   * session ever opened (95 in this workspace alone) and nothing else evicts them;
+   * forgetting the oldest session costs nothing because the next event for it
+   * re-registers a snapshot.
+   */
+  const MAX_TRACKED_SESSIONS = 200
+  const trackSession = sessionId => {
+    if (!cwds.has(sessionId) && cwds.size >= MAX_TRACKED_SESSIONS) {
+      const oldest = cwds.keys().next().value
+      if (oldest !== undefined && oldest !== sessionId) forgetSession(oldest)
+    }
+  }
   const mutate = action => withStoreLock(tasteDir('', 'global'), action)
   const queuePaths = new Map()
   const blockedQueues = new Set()
@@ -314,12 +342,16 @@ function start(ctx, rawConfig) {
       if (error.code !== 'ENOENT') {
         blockedQueues.add(sessionId)
         ctx.logger?.warn?.('taste: pending queue could not be restored; capture paused to preserve the file: %o', error)
+        log.warn('pending-restore-failed', { sessionId, path, error })
       }
     }
   }
   const persistPending = sessionId => blockedQueues.has(sessionId) ? Promise.resolve() : mutate(() => writeAtomic(queuePaths.get(sessionId), JSON.stringify({
     pending: pending.get(sessionId) ?? [], seen: [...(seenMessages.get(sessionId) ?? [])],
-  }))).catch(error => ctx.logger?.warn?.('taste: pending queue write failed: %o', error))
+  }))).catch(error => {
+    ctx.logger?.warn?.('taste: pending queue write failed: %o', error)
+    log.warn('pending-write-failed', { sessionId, error })
+  })
   let fallbackRegistered = false
   let fallbackSessionId
 
@@ -354,6 +386,7 @@ function start(ctx, rawConfig) {
   }
 
   const refresh = (sessionId, cwd) => {
+    trackSession(sessionId)
     cwds.set(sessionId, cwd)
     snapshots.set(sessionId, mergeFor(cwd))
   }
@@ -408,7 +441,10 @@ function start(ctx, rawConfig) {
         }
         await saveState(dir, state)
       }
-    }).catch(error => ctx.logger?.warn?.('taste: usage write failed: %o', error))
+    }).catch(error => {
+      ctx.logger?.warn?.('taste: usage write failed: %o', error)
+      log.warn('usage-write-failed', { sessionId, error })
+    })
   }
 
   const registerContext = (scoped, sessionId) => {
@@ -419,6 +455,7 @@ function start(ctx, rawConfig) {
         fallbackRegistered = true
         fallbackSessionId = sessionId
         ctx.logger?.info?.('taste: event context is not agent-scoped; using one global prompt section')
+        log.warn('prompt-section-fallback', { sessionId })
         ctx.systemPrompt.context({
           name: 'taste',
           order: 920,
@@ -428,6 +465,7 @@ function start(ctx, rawConfig) {
         return
       }
       ctx.logger?.info?.('taste: registered an agent-scoped prompt section')
+      log.debug('prompt-section-scoped', { sessionId })
       scoped.systemPrompt.context({
         name: 'taste',
         order: 920,
@@ -436,6 +474,7 @@ function start(ctx, rawConfig) {
       })
     } catch (error) {
       ctx.logger?.warn?.('taste: prompt section registration failed: %o', error)
+      log.error('prompt-section-failed', { sessionId, error })
     }
   }
 
@@ -635,6 +674,7 @@ function start(ctx, rawConfig) {
       if (!warnedHostRoute) {
         warnedHostRoute = true
         ctx.logger?.warn?.('taste: model.source is "host" but the harness model route is unavailable; extraction skipped')
+        log.error('host-route-unavailable')
       }
       return undefined
     }
@@ -649,7 +689,17 @@ function start(ctx, rawConfig) {
   const maybeExtract = (sessionId, cwd) => {
     if (!canExtract(config)) return
     const queue = pending.get(sessionId) ?? []
-    if (queue.length < config.extract.minPending) return
+    if (queue.length === 0) return
+    // A queue that never reaches minPending is a queue that never gets distilled:
+    // 11 signals were stranded across 14 session files for weeks, one or two per
+    // session. Once the oldest entry is older than the staleness window, distil
+    // whatever is there rather than waiting for a threshold it will not reach.
+    const oldest = queue.reduce((earliest, entry) => {
+      const at = Date.parse(entry?.at ?? '')
+      return Number.isFinite(at) && at < earliest ? at : earliest
+    }, Number.POSITIVE_INFINITY)
+    const stale = config.extract.stalePendingHours > 0 && Number.isFinite(oldest) && Date.now() - oldest >= config.extract.stalePendingHours * 3_600_000
+    if (queue.length < config.extract.minPending && !stale) return
     if (extracting.has(sessionId)) return
     const last = lastExtract.get(sessionId) ?? 0
     if (Date.now() - last < config.extract.throttleMinutes * 60_000) return
@@ -659,6 +709,7 @@ function start(ctx, rawConfig) {
     extracting.add(sessionId)
     lastExtract.set(sessionId, Date.now())
     const startedAt = Date.now()
+    if (stale && queue.length < config.extract.minPending) log.info('extract-stale-queue', { sessionId, signals: queue.length, oldest })
     const route = config.model.source === 'host' ? 'host' : `${config.model.format}:${config.model.model}`
     runExtraction({ config, pending: batch, cwd, addRule, callModel, confidence: DISTILLED_CONFIDENCE })
       .then(result => {
@@ -680,6 +731,7 @@ function start(ctx, rawConfig) {
           ms: Date.now() - startedAt,
         })
         if (stored > 0) ctx.logger?.info?.('taste: extracted %d rule(s) from %d signal(s)', stored, batch.length)
+        log.info('extract-ok', { stored, signals: batch.length, consumed: result?.consumed ?? 0, inputTokens: result?.usage?.inputTokens, outputTokens: result?.usage?.outputTokens, ms: Date.now() - startedAt })
       })
       .catch(error => {
         recordUsage({
@@ -692,6 +744,7 @@ function start(ctx, rawConfig) {
           ms: Date.now() - startedAt,
         })
         ctx.logger?.warn?.('taste: extraction failed: %o', error)
+        log.error('extract-failed', { signals: batch.length, ms: Date.now() - startedAt, error })
       })
       .finally(() => extracting.delete(sessionId))
   }
@@ -706,8 +759,36 @@ function start(ctx, rawConfig) {
       registerContext(this, sessionId)
     } catch (error) {
       ctx.logger?.warn?.('taste: session initialisation failed: %o', error)
+      log.error('session-init-failed', { sessionId, error })
     }
   })
+
+  /**
+   * Forget one session's in-memory state. Without this the maps grow for every
+   * session the app ever opened: 95 sessions in this workspace alone. The queue
+   * file stays on disk so a resumed session still restores its own signals.
+   * @param {string} sessionId - session to drop.
+   */
+  const forgetSession = sessionId => {
+    snapshots.delete(sessionId)
+    cwds.delete(sessionId)
+    recent.delete(sessionId)
+    uncounted.delete(sessionId)
+    pending.delete(sessionId)
+    seenMessages.delete(sessionId)
+    queuePaths.delete(sessionId)
+    blockedQueues.delete(sessionId)
+    lastExtract.delete(sessionId)
+    log.debug('session-forgotten', { sessionId })
+  }
+
+  for (const event of ['agent/deleted', 'agent/disposed', 'agent/closed']) {
+    ctx.on(event, payload => {
+      const session = payload?.agent?.session
+      if (!session) return
+      forgetSession(sessionIdOf(session))
+    })
+  }
 
   ctx.on('agent/inbox/claimed', payload => {
     const session = payload?.agent?.session
@@ -733,7 +814,10 @@ function start(ctx, rawConfig) {
       if (target !== undefined) {
         reinforceRule(cwd, target)
           .then(() => refreshWorkspace(cwd))
-          .catch(error => ctx.logger?.warn?.('taste: reinforcement failed: %o', error))
+          .catch(error => {
+            ctx.logger?.warn?.('taste: reinforcement failed: %o', error)
+            log.warn('reinforce-failed', { target, error })
+          })
       }
       return
     }
@@ -760,7 +844,10 @@ function start(ctx, rawConfig) {
           persistPending(sessionId)
           refreshWorkspace(cwd)
         })
-        .catch(error => ctx.logger?.warn?.('taste: auto-learn failed: %o', error))
+        .catch(error => {
+          ctx.logger?.warn?.('taste: auto-learn failed: %o', error)
+          log.warn('auto-learn-failed', { kind: signal.kind, error })
+        })
     }
   })
 
@@ -811,6 +898,10 @@ function start(ctx, rawConfig) {
         const queue = pending.get(sessionId) ?? []
         return queue.map(entry => ({ ...entry }))
       },
+      readLogs: query => getLogger().tail(query),
+      formatLogs,
+      clearLogs,
+      logPath,
     }),
   )
 }

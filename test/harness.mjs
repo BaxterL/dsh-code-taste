@@ -15,7 +15,7 @@ const work = mkdtempSync(join(tmpdir(), 'taste-work-'))
 process.env.DSH_HOME = home
 
 const { apply, initialState } = await import('../index.js')
-const { similarity, decayed, contentId, parseMarkdown, renderMarkdown } = await import('../lib/store.js')
+const { similarity, decayed, contentId, parseMarkdown, renderMarkdown, mergeSections } = await import('../lib/store.js')
 const { classify, prefilter, captureText } = await import('../lib/signals.js')
 const { resolveConfig, canExtract } = await import('../lib/config.js')
 const { buildRequest, parseResponse } = await import('../lib/llm.js')
@@ -271,6 +271,9 @@ check('hybrid with a route can extract', canExtract(resolveConfig({ mode: 'hybri
 check('host source needs no route', canExtract(resolveConfig({ model: { source: 'host' } }).config) === true)
 check('host source is described as the harness model', resolveConfig({ model: { source: 'host' } }).config.model.source === 'host')
 check('budget is clamped', resolveConfig({ injectBudgetChars: 1 }).config.injectBudgetChars === 400)
+check('stale queue window defaults to 72h', resolveConfig(undefined).config.extract.stalePendingHours === 72)
+check('stale window can be turned off', resolveConfig({ stalePendingHours: 0 }).config.extract.stalePendingHours === 0)
+check('an unknown log level falls back with a warning', resolveConfig({ logLevel: 'loud' }).config.logLevel === 'info' && resolveConfig({ logLevel: 'loud' }).warnings.some(w => w.includes('logLevel')))
 const shown = await tool.execute({ action: 'config' }, exec)
 check('taste config reports the active mode', shown.text.includes('source: custom') && shown.text.includes('qwen-plus'))
 check('taste config never prints a key', !shown.text.includes('sk-'))
@@ -479,10 +482,108 @@ check('correction becomes a pending rule instead of a dead queue entry', noneTex
 check('the correction text is kept', noneText.includes('不要用 any'))
 check('regex mode writes no active rule', !/不要用 any @0\.(5[5-9]|[6-9])/.test(noneText))
 
+console.log('\n# structured log')
+const logHome = mkdtempSync(join(tmpdir(), 'taste-log-'))
+process.env.DSH_HOME = logHome
+const { getLogger, resetLogger, logPath: resolveLogPath, clearLogs } = await import('../lib/log.js')
+resetLogger()
+const logger = getLogger({ level: 'debug' })
+logger.info('boot', { source: 'host' })
+logger.warn('pending-write-failed', { sessionId: 's1', error: new Error('disk is full') })
+logger.debug('suppressed-when-quiet')
+const logText = readFileSync(resolveLogPath(), 'utf8')
+check('log writes one JSON object per line', logText.trim().split('\n').every(line => typeof JSON.parse(line).event === 'string'))
+check('log keeps the error message and stack', logText.includes('disk is full'))
+check('log records the level', logText.includes('"level":"warn"'))
+logger.error('leak', { key: 'sk-abcdefghijklmnopqrstuvwxyz123456' })
+const afterLeak = readFileSync(resolveLogPath(), 'utf8')
+check('credentials never reach the log', !afterLeak.includes('sk-abcdefghijklmnopqrstuvwxyz123456') && afterLeak.includes('[redacted]'))
+const quiet = getLogger({ level: 'error' })
+const beforeQuiet = readFileSync(resolveLogPath(), 'utf8')
+quiet.debug('too-quiet-to-write')
+check('a level above the threshold writes nothing', readFileSync(resolveLogPath(), 'utf8') === beforeQuiet)
+check('tail returns newest entries first-to-last', quiet.tail({ lines: 2 }).at(-1).event === 'too-quiet-to-write' || quiet.tail({ lines: 2 }).length === 2)
+check('tail filters by level', quiet.tail({ level: 'error', lines: 50 }).every(entry => entry.level === 'error'))
+clearLogs()
+check('clearLogs empties the file', !existsSync(resolveLogPath()))
+
+console.log('\n# log is reachable through the tool')
+const logToolCtx = {
+  logger: { info() {}, warn() {} },
+  effect: run => run(),
+  on() {},
+  tools: { register(definition) { logToolCtx.tool = definition } },
+  systemPrompt: { section() {}, context() {} },
+  workingDirectory: { get: () => logHome },
+}
+resetLogger()
+apply(logToolCtx, { source: 'none' })
+getLogger({ level: 'info' }).info('boot', { source: 'none' })
+const logsAction = await logToolCtx.tool.execute({ action: 'logs', lines: 10 }, { agent: { session: { id: 'log' } } })
+check('logs action reports the file path', logsAction.text.includes('taste.log'))
+check('logs action shows the boot entry', logsAction.text.includes('boot'))
+const clearedAction = await logToolCtx.tool.execute({ action: 'logs', clear: true }, { agent: { session: { id: 'log' } } })
+check('logs action can clear', clearedAction.text.includes('Cleared'))
+resetLogger()
+
+console.log('\n# duplicate section headings collapse')
+const merged = mergeSections([
+  '<!-- notes -->',
+  '## workflow',
+  '- [r_a] 甲 @0.80 src:tool ev:1',
+  '## design',
+  '## workflow',
+  '- [r_b] 乙 @0.80 src:tool ev:1',
+  '## design',
+  '- [r_c] 丙 @0.80 src:tool ev:1',
+  '',
+].join('\n'))
+check('one heading per category', (merged.match(/^## workflow$/gm) ?? []).length === 1 && (merged.match(/^## design$/gm) ?? []).length === 1)
+check('empty sections are dropped', !/## design\n\n##/.test(merged))
+check('every rule survives the merge', merged.includes('甲') && merged.includes('乙') && merged.includes('丙'))
+check('the preamble is preserved', merged.includes('<!-- notes -->'))
+const messyFile = [
+  '## workflow',
+  '- [r_x] 甲 @0.80 src:tool ev:1',
+  '## design',
+  '## workflow',
+  '- [r_y] 乙 @0.80 src:tool ev:1',
+  '',
+].join('\n')
+const rewritten = renderMarkdown(parseMarkdown(messyFile, 'project'), messyFile)
+check('rewriting a messy file does not add headings', (rewritten.match(/^## workflow$/gm) ?? []).length === 1)
+
+console.log('\n# session state is released')
+const releaseHandlers = new Map()
+const releaseCtx = {
+  logger: { info() {}, warn() {} },
+  effect: run => run(),
+  on(name, listener) { releaseHandlers.set(name, listener) },
+  tools: { register() {} },
+  systemPrompt: { section() {}, context() {} },
+  workingDirectory: { get: () => work },
+}
+resetLogger()
+apply(releaseCtx, { source: 'none' })
+const releaseSession = { id: 'sess-release' }
+releaseHandlers.get('agent/created')({ agent: { session: releaseSession } })
+check('a teardown event is registered', typeof releaseHandlers.get('agent/deleted') === 'function')
+// The teardown handler must not throw on a session it has never seen.
+let teardownError
+try {
+  releaseHandlers.get('agent/deleted')({ agent: { session: { id: 'never-seen' } } })
+  releaseHandlers.get('agent/deleted')({ agent: {} })
+} catch (error) {
+  teardownError = error
+}
+check('teardown tolerates unknown and empty sessions', teardownError === undefined)
+check('teardown still answers a prompt build afterwards', typeof releaseHandlers.get('agent/created')({ agent: { session: releaseSession } }) !== 'throw')
+
 rmSync(home, { recursive: true, force: true })
 rmSync(work, { recursive: true, force: true })
 rmSync(home2, { recursive: true, force: true })
 rmSync(work2, { recursive: true, force: true })
+rmSync(logHome, { recursive: true, force: true })
 
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`} — ${checks} checks`)
 process.exit(failures === 0 ? 0 : 1)

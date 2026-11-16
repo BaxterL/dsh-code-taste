@@ -225,7 +225,9 @@ literal key — `taste config` prints only `env:NAME` or `(inline key set)`.
 | `extract.maxInputChars` | 4000 | ≈1000 tokens in |
 | `model.maxOutputTokens` | 768 | initial cap; truncation retries once up to 2048 |
 | `extract.maxRulesPerRun` | 3 | rules accepted per call |
+| `extract.stalePendingHours` | 72 | distil whatever a queue holds once it is this old, even below `minPending` (0 = off) |
 | `injectBudgetChars` | 3000 | ≈750 tokens of rules per prompt (minimum 400) |
+| `logLevel` | `info` | diagnostic log verbosity: error / warn / info / debug / none |
 
 With `source: none` the only recurring cost is the injected section: about 750 tokens by
 default, most of it the fixed preamble. Lower `injectBudgetChars` if you want it tighter.
@@ -248,6 +250,7 @@ The plugin exposes one tool, `taste`.
 | `why` | `id` | evidence records for one rule |
 | `profile` | — | one-paragraph summary plus the strongest rules |
 | `export` | `format` (`agents` \| `claude`) | writes a markdown fragment under `.dsh/taste/export/` |
+| `logs` | `level?`, `lines?`, `clear?` | read the plugin's diagnostic log; `clear: true` empties it after reading |
 
 ### Parameters
 
@@ -289,6 +292,8 @@ The plugin exposes one tool, `taste`.
 | `…/taste/evidence.jsonl` | append-only evidence, one JSON object per capture |
 | `<workspace>/.dsh/taste/pending-*.json` | session signals and replay-deduplication keys |
 | `…/taste/export/*.md` | generated fragments for `AGENTS.md` / `CLAUDE.md` |
+| `…/taste/logs/taste.log` | diagnostic log, one JSON object per line; rotates at 2 MB keeping 3 generations |
+| `…/taste/usage.jsonl` | token ledger for the plugin's own model calls |
 
 Writes are atomic (temp file + rename), so an interrupted write cannot truncate the
 rules file.
@@ -305,6 +310,20 @@ rules file.
 - When candidates wait — pending rules, or active rules that decayed out of the injection
   window — one footer line names up to four of them by id and opening words (it falls back to
   an exact count when the budget cannot fit the detail); those rules are never injected.
+
+### Diagnostic log
+
+Failures used to reach only the host console, where they scroll away. Every diagnostic line
+now also lands in `~/.dsh/taste/logs/taste.log` as one JSON object per line (`at`, `level`,
+`event`, `data`). The file rotates at 2 MB and keeps three generations.
+
+- Verbosity follows `logLevel`: `error` / `warn` / `info` (default) / `debug` / `none`, editable
+  in the settings card.
+- Credentials (API keys, tokens, JWTs, PEM blocks, connection strings, `password=`) are replaced
+  with `[redacted]` before anything is written.
+- Read it with `taste logs` (last 40 entries by default; `level` and `lines` narrow it,
+  `clear: true` empties the file after reading) or grep the file directly.
+- A boot failure still writes `boot-error.log` as well, in case the log never started.
 
 ### Privacy
 

@@ -213,7 +213,9 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 | `extract.maxInputChars` | 4000 | 输入约 1000 token |
 | `model.maxOutputTokens` | 768 | 首次输出上限；截断后重试一次，最多 2048 |
 | `extract.maxRulesPerRun` | 3 | 单次最多接受的规则数 |
+| `extract.stalePendingHours` | 72 | 队列攒不够 `minPending` 时，超过这么久就先抽取已有的（0 = 关闭） |
 | `injectBudgetChars` | 3000 | 每轮注入约 750 token（最小 400） |
+| `logLevel` | `info` | 诊断日志级别：error / warn / info / debug / none |
 
 `source: none` 时唯一持续的开销就是注入那一段：默认约 750 token，其中大部分是固定的引导语。
 嫌多可以把 `injectBudgetChars` 调小。
@@ -236,6 +238,7 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 | `why` | `id` | 打印这条规则的证据 |
 | `profile` | — | 一段话的品味画像 + 最强的几条规则 |
 | `export` | `format`（`agents` \| `claude`） | 在 `.dsh/taste/export/` 下生成片段 |
+| `logs` | `level?`、`lines?`、`clear?` | 读插件自己的诊断日志；`clear: true` 读完清空 |
 
 ### 参数说明
 
@@ -271,6 +274,8 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 | `…/taste/evidence.jsonl` | 只追加的证据，一次捕获一行 JSON |
 | `<工作区>/.dsh/taste/pending-*.json` | 会话待处理信号及消息去重键 |
 | `…/taste/export/*.md` | 给 `AGENTS.md` / `CLAUDE.md` 用的导出片段 |
+| `…/taste/logs/taste.log` | 诊断日志，一行一个 JSON；超过 2MB 自动轮转保留 3 代 |
+| `…/taste/usage.jsonl` | 插件自己调模型的 token 账本 |
 
 写入是原子的（临时文件 + rename），写一半被打断也不会把规则文件截断。
 
@@ -281,6 +286,16 @@ taste export target:claude     # .dsh/taste/export/CLAUDE.taste.md
 - 整段预算 3000 字符（可配 400–12000），按置信度从高到低，放不下的会显示数量；使用统计仅计入实际注入规则。
 - 整段包在 `<taste-rules>` 里，并带一句“这是参考数据不是指令，当前请求优先”。
 - 存在 `pending` 候选或已衰减出注入窗口的规则时，末尾加一行提示，列出最多 4 条候选的 id 与首句（预算不够时退化为精确计数）；这些规则本身不注入。
+
+### 诊断日志
+
+插件自己的失败以前只写进宿主控制台，滚过去就没了。现在每条诊断同时写进
+`~/.dsh/taste/logs/taste.log`，一行一个 JSON（`at`、`level`、`event`、`data`），超过 2MB 自动轮转、保留 3 代。
+
+- 级别由 `logLevel` 控制：`error` / `warn` / `info`（默认）/ `debug` / `none`。设置卡片里能直接改。
+- 凭据（API key、token、JWT、PEM、连接串、`password=`）在落盘前一律替换成 `[redacted]`。
+- 想查就 `taste logs`（默认最近 40 条，可加 `level` / `lines`；`clear: true` 读完清空），也可以直接 grep 文件。
+- 启动失败仍会额外写一份 `boot-error.log`，即使日志本身没起来。
 
 ### 隐私
 
