@@ -355,12 +355,23 @@ function start(ctx, rawConfig) {
   let fallbackRegistered = false
   let fallbackSessionId
 
-  const cwdOf = session => {
-    try {
-      const path = ctx.workingDirectory.get(session)
-      if (typeof path === 'string' && path.length > 0) return path
-    } catch {
-      // fall through
+  /**
+   * Resolve one session's working directory, preferring the agent's own scoped
+   * service: when the plugin context is shared, its `workingDirectory` may answer
+   * for whichever workspace the plugin was loaded in, and a project rule would
+   * then be read from — and written to — the wrong workspace.
+   * @param {object} session - the agent's session.
+   * @param {object} [scoped] - the agent-scoped context, when one exists.
+   * @returns {string} an absolute workspace path.
+   */
+  const cwdOf = (session, scoped) => {
+    for (const holder of [scoped, ctx]) {
+      try {
+        const path = holder?.workingDirectory?.get?.(session)
+        if (typeof path === 'string' && path.length > 0) return path
+      } catch {
+        // fall through to the next holder
+      }
     }
     return process.cwd()
   }
@@ -398,20 +409,27 @@ function start(ctx, rawConfig) {
     }
   }
 
-  const renderFor = sessionId => {
+  const renderFor = (sessionId, options = {}) => {
     const cwd = cwds.get(sessionId)
     if (cwd) refresh(sessionId, cwd)
-    const rules = snapshots.get(sessionId) ?? []
+    const all = snapshots.get(sessionId) ?? []
+    // A fallback section serves every workspace at once. Project rules belong to a
+    // single one, so they are only safe to include while exactly one workspace is
+    // in play; once a second one appears the section narrows to global rules
+    // rather than borrowing another project's conventions.
+    const ambiguous = options.globalOnly === true && new Set(cwds.values()).size > 1
+    const rules = ambiguous ? all.filter(rule => rule.scope === 'global') : all
     // Candidates are listed, not merely counted: a bare number tells a reader that
     // something waits for review but not what, which is how a learned rule stayed
     // invisible to both the model and the user. Decayed actives count as candidates.
     const waiting = rules.filter(isCandidate)
     const injected = []
     const text = renderPrompt(rules, { candidates: waiting, budget: config.injectBudgetChars, onSelected: chosen => injected.push(...chosen) })
+    if (sessionId === undefined) return text
     // The host may assemble a prompt several times per turn, so keep the union:
     // usage accounting must not shrink to whichever render happened last.
     const previous = uncounted.get(sessionId) ?? []
-    const union = [...previous, ...injected].filter((rule, index, all) => all.findIndex(item => item.id === rule.id && item.scope === rule.scope) === index)
+    const union = [...previous, ...injected].filter((rule, index, allRules) => allRules.findIndex(item => item.id === rule.id && item.scope === rule.scope) === index)
     recent.set(sessionId, union)
     uncounted.set(sessionId, union)
     return text
@@ -447,20 +465,42 @@ function start(ctx, rawConfig) {
     })
   }
 
+  /**
+   * Pick the context whose `systemPrompt` is scoped to one agent.
+   *
+   * The listener `this` is not agent-scoped in the shipped host (the log shows
+   * `prompt-section-fallback` every boot), so the section used to fall back to a
+   * single global one pinned to whichever session booted first — which then
+   * injected that workspace's project rules into every other workspace. The
+   * agent carries its own scoped context, so prefer that.
+   * @param {object} eventThis - the listener's `this`.
+   * @param {object} payload - the `agent/created` payload.
+   * @returns {object|undefined} a scoped context, or undefined when none is scoped.
+   */
+  const scopedFor = (eventThis, payload) => {
+    const candidates = [payload?.agent?.ctx, payload?.ctx, eventThis]
+    for (const candidate of candidates) {
+      if (candidate && candidate !== ctx && typeof candidate.systemPrompt?.context === 'function') return candidate
+    }
+    return undefined
+  }
+
   const registerContext = (scoped, sessionId) => {
-    const isScoped = scoped && scoped !== ctx && typeof scoped.systemPrompt?.context === 'function'
     try {
-      if (!isScoped) {
+      if (!scoped) {
         if (fallbackRegistered) return
         fallbackRegistered = true
         fallbackSessionId = sessionId
-        ctx.logger?.info?.('taste: event context is not agent-scoped; using one global prompt section')
+        ctx.logger?.warn?.('taste: no agent-scoped context; injecting global rules only')
         log.warn('prompt-section-fallback', { sessionId })
+        // Global rules are workspace-independent, so this stays correct across
+        // workspaces; project rules are simply omitted rather than borrowed from
+        // whichever session happened to boot first.
         ctx.systemPrompt.context({
           name: 'taste',
           order: 920,
           required: false,
-          text: () => renderFor(fallbackSessionId),
+          text: () => renderFor(fallbackSessionId, { globalOnly: true }),
         })
         return
       }
@@ -753,10 +793,11 @@ function start(ctx, rawConfig) {
     const session = payload?.agent?.session
     if (!session) return
     const sessionId = sessionIdOf(session)
+    const scoped = scopedFor(this, payload)
     try {
-      refresh(sessionId, cwdOf(session))
-      restorePending(sessionId, cwdOf(session))
-      registerContext(this, sessionId)
+      refresh(sessionId, cwdOf(session, scoped))
+      restorePending(sessionId, cwdOf(session, scoped))
+      registerContext(scoped, sessionId)
     } catch (error) {
       ctx.logger?.warn?.('taste: session initialisation failed: %o', error)
       log.error('session-init-failed', { sessionId, error })
@@ -798,8 +839,9 @@ function start(ctx, rawConfig) {
     const signal = classify(filtered.text)
     if (signal === null) return
     const sessionId = sessionIdOf(session)
-    const cwd = cwdOf(session)
-    restorePending(sessionId, cwd)
+    // The workspace was resolved when the agent was created, from its scoped
+    // services; re-resolving here could pick the process-wide context instead.
+    const cwd = cwds.get(sessionId) ?? cwdOf(session, scopedFor(this, payload))
     if (blockedQueues.has(sessionId)) return
     const seen = seenMessages.get(sessionId) ?? new Set()
     const messageKey = payload?.message?.id ?? contentId(filtered.text)
@@ -857,7 +899,7 @@ function start(ctx, rawConfig) {
     const sessionId = sessionIdOf(session)
     markUsed(sessionId, uncounted.get(sessionId) ?? [])
     uncounted.delete(sessionId)
-    maybeExtract(sessionIdOf(session), cwdOf(session))
+    maybeExtract(sessionIdOf(session), cwds.get(sessionId) ?? cwdOf(session, scopedFor(this, payload)))
   })
 
   const tools = ctx.get?.('tools') ?? ctx.tools

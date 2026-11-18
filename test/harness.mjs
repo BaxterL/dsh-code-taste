@@ -4,7 +4,7 @@
  * Run with `node test/harness.mjs`.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
@@ -578,6 +578,63 @@ try {
 }
 check('teardown tolerates unknown and empty sessions', teardownError === undefined)
 check('teardown still answers a prompt build afterwards', typeof releaseHandlers.get('agent/created')({ agent: { session: releaseSession } }) !== 'throw')
+
+console.log('\n# agent-scoped sections win over the shared fallback')
+const scopedWorkA = mkdtempSync(join(tmpdir(), 'taste-ws-a-'))
+const scopedWorkB = mkdtempSync(join(tmpdir(), 'taste-ws-b-'))
+mkdirSync(join(scopedWorkA, '.dsh', 'taste'), { recursive: true })
+mkdirSync(join(scopedWorkB, '.dsh', 'taste'), { recursive: true })
+writeFileSync(join(scopedWorkA, '.dsh', 'taste', 'TASTE.md'), '## workflow\n- [r_wsA] 只在工作区 A 生效的规则 @0.9 src:tool ev:1\n', 'utf8')
+writeFileSync(join(scopedWorkB, '.dsh', 'taste', 'TASTE.md'), '## workflow\n- [r_wsB] 只在工作区 B 生效的规则 @0.9 src:tool ev:1\n', 'utf8')
+const scopedHandlers = new Map()
+const sharedSections = []
+const scopedCtx = {
+  logger: { info() {}, warn() {} },
+  effect: run => run(),
+  on(name, listener) { scopedHandlers.set(name, listener) },
+  tools: { register() {} },
+  systemPrompt: { section() {}, context(entry) { sharedSections.push(entry) } },
+  workingDirectory: { get: () => scopedWorkA },
+}
+resetLogger()
+apply(scopedCtx, { source: 'none' })
+// A scoped context carries its own workingDirectory, which is how one agent's
+// project rules reach only that agent.
+const makeScoped = workDir => {
+  const sections = []
+  return {
+    sections,
+    ctx: {
+      systemPrompt: { context(entry) { sections.push(entry) } },
+      workingDirectory: { get: () => workDir },
+    },
+  }
+}
+const scopedA = makeScoped(scopedWorkA)
+const scopedB = makeScoped(scopedWorkB)
+scopedHandlers.get('agent/created').call({}, { agent: { session: { id: 'sess-a' }, ctx: scopedA.ctx } })
+scopedHandlers.get('agent/created').call({}, { agent: { session: { id: 'sess-b' }, ctx: scopedB.ctx } })
+check('an agent-scoped context receives its own section', scopedA.sections.length === 1 && scopedB.sections.length === 1)
+check('no shared fallback is registered when scoping works', sharedSections.length === 0)
+check('workspace A sees only its own project rule', scopedA.sections[0].text().includes('工作区 A') && !scopedA.sections[0].text().includes('工作区 B'))
+check('workspace B sees only its own project rule', scopedB.sections[0].text().includes('工作区 B') && !scopedB.sections[0].text().includes('工作区 A'))
+// With no usable scoped context the shared section must not borrow a project.
+const fallbackHandlers = new Map()
+const fallbackSections = []
+const fallbackCtx = {
+  logger: { info() {}, warn() {} },
+  effect: run => run(),
+  on(name, listener) { fallbackHandlers.set(name, listener) },
+  tools: { register() {} },
+  systemPrompt: { section() {}, context(entry) { fallbackSections.push(entry) } },
+  workingDirectory: { get: () => scopedWorkA },
+}
+resetLogger()
+apply(fallbackCtx, { source: 'none' })
+fallbackHandlers.get('agent/created').call(fallbackCtx, { agent: { session: { id: 'sess-a' } } })
+fallbackHandlers.get('agent/created').call(fallbackCtx, { agent: { session: { id: 'sess-b' } } })
+check('the shared fallback is registered once', fallbackSections.length === 1)
+check('a sole workspace may still show its project rules', fallbackSections[0].text().includes('工作区 A'))
 
 rmSync(home, { recursive: true, force: true })
 rmSync(work, { recursive: true, force: true })
